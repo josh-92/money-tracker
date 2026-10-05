@@ -1,0 +1,7 @@
+{
+  "name": "banking-notification",
+  "platforms": ["android"],
+  "android": {
+    "modules": ["com.moneytracker.notification.BankingNotificationModule"]
+  }
+}

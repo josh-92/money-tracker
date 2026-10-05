@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "money-tracker",
+    "slug": "money-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.moneytracker.app"
+    },
+    "plugins": [
+      "./plugins/withNotificationListener.js",
+      "expo-dev-client"
+    ],
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "a9e0c6c8-1743-47a3-8760-a1379dac979a"
+      }
+    },
+    "owner": "joj92"
+  }
+}
