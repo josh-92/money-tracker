@@ -37,13 +37,79 @@ const testCases = [
     text: 'Your account ***3901 has been debited by ETB 800.00 at Total Bole on 04/10/2026. Available Balance: ETB 1,300.00. Reference: AW9876.',
     expected: { provider: 'AWASH', type: 'EXPENSE', amount: 800, merchant: 'TotalEnergies', balance: 1300, ref: 'AW9876' },
   },
+  {
+    name: 'Telebirr Outgoing Transfer (No inline date)',
+    text: 'You have transferred ETB 500.00 to Abebe Bikila (0911000000). Txn number: TR9988. Current balance is ETB 1500.00.',
+    expected: { provider: 'TELEBIRR', type: 'TRANSFER', amount: 500, merchant: 'Abebe Bikila', balance: 1500, ref: 'TR9988' },
+  },
+  {
+    name: 'Telebirr Outgoing Transfer (Amharic start with ለ)',
+    text: 'ለ Abebe Bikila (0911000000) የ 500.00 ብር አስተላልፈዋል። የግብይት ቁጥር: TR9988። ቀሪ ሂሳብ: 1500.00 ብር',
+    expected: { provider: 'TELEBIRR', type: 'TRANSFER', amount: 500, merchant: 'Abebe Bikila', balance: 1500, ref: 'TR9988' },
+  },
+  {
+    name: 'Telebirr Outgoing Transfer (Amharic start with ወደ)',
+    text: 'ወደ Abebe Bikila (0911000000) የ 500.00 ብር አስተላልፈዋል። የግብይት ቁጥር: TR9988። ቀሪ ሂሳብ: 1500.00 ብር',
+    expected: { provider: 'TELEBIRR', type: 'TRANSFER', amount: 500, merchant: 'Abebe Bikila', balance: 1500, ref: 'TR9988' },
+  },
+  {
+    name: 'Telebirr Outgoing Transfer (With successfully)',
+    text: 'Transferred ETB 500.00 to Abebe Bikila successfully. Balance: ETB 1,500.00. Txn No: TR9988',
+    expected: { provider: 'TELEBIRR', type: 'TRANSFER', amount: 500, merchant: 'Abebe Bikila', balance: 1500, ref: 'TR9988' },
+  },
+  {
+    name: 'Awash Credit Alert (Standard SMS)',
+    text: 'Your account ***3901 has been credited with ETB 5,000.00 on 04/10/2026. Available Balance: ETB 6,300.00. Reference: AW5432.',
+    expected: { provider: 'AWASH', type: 'INCOME', amount: 5000, merchant: 'Awash Credit', balance: 6300, ref: 'AW5432' },
+  },
+  {
+    name: 'Awash Credit Alert (With sender)',
+    text: 'Acc 0132*** is credited with ETB 2,500.00 from Abebe Bikila. Ref: 98765.',
+    expected: { provider: 'AWASH', type: 'INCOME', amount: 2500, merchant: 'Abebe Bikila', ref: '98765' },
+  },
+  {
+    name: 'Awash Credit Alert (Without with/by token)',
+    text: 'Your account ***3901 has been credited ETB 5,000.00 on 04/10/2026. Available Balance: ETB 6,300.00. Reference: AW5432.',
+    expected: { provider: 'AWASH', type: 'INCOME', amount: 5000, merchant: 'Awash Credit', balance: 6300, ref: 'AW5432' },
+  },
+  {
+    name: 'Awash POS Purchase Debit Alert',
+    text: 'Dear Customer, Acc ***3901 is debited with ETB 1,200.00 for POS Purchase. Available Bal: ETB 100.00. Ref: AW123456.',
+    expected: { provider: 'AWASH', type: 'EXPENSE', amount: 1200, merchant: 'POS Purchase', balance: 100, ref: 'AW123456' },
+  },
+  {
+    name: 'Awash Debit Alert (Without by/with token)',
+    text: 'Your account ***3901 was debited ETB 450.00. Available Bal: ETB 2,500.00. Ref: 12345.',
+    expected: { provider: 'AWASH', type: 'EXPENSE', amount: 450, merchant: 'Awash Debit', balance: 2500, ref: '12345' },
+  },
+  {
+    name: 'Awash 8900 Shortcode Hint',
+    text: 'Your account ***3901 has been credited ETB 1,500.00. Ref: AW1122.',
+    senderHint: '8900',
+    expected: { provider: 'AWASH', type: 'INCOME', amount: 1500, merchant: 'Awash Credit', ref: 'AW1122' },
+  },
+  {
+    name: 'Awash Birr Wallet Inflow',
+    text: 'You have received ETB 1,000.00 from Abebe Bikila (0911223344) on 04/10/2026. Txn ID: AW1234. Your balance is ETB 2,500.00.',
+    expected: { provider: 'AWASH', type: 'INCOME', amount: 1000, merchant: 'Abebe Bikila', balance: 2500, ref: 'AW1234' },
+  },
+  {
+    name: 'Awash Amharic Debit (ከሂሳብ ቁጥር)',
+    text: 'ከሂሳብ ቁጥር ***3901 የ 800.00 ብር ወጪ ተደርጓል (Total Bole)። ቀሪ ሂሳብ: 1,300.00 ብር። መለያ ቁጥር: AW9876',
+    expected: { provider: 'AWASH', type: 'EXPENSE', amount: 800, merchant: 'TotalEnergies', balance: 1300, ref: 'AW9876' },
+  },
+  {
+    name: 'Awash Amharic Credit (የሂሳብ ቁጥር)',
+    text: 'የሂሳብ ቁጥር ***3901 የ 5,000.00 ብር ገቢ ተደርጓል (ከ Payroll)። ቀሪ ሂሳብ: 6,300.00 ብር። መለያ ቁጥር: AW5432',
+    expected: { provider: 'AWASH', type: 'INCOME', amount: 5000, merchant: 'Payroll', balance: 6300, ref: 'AW5432' },
+  },
 ];
 
 console.log('--- RUNNING ETHIOPIAN BANK REGEX VERIFICATION ---');
 let passed = 0;
 
 for (const tc of testCases) {
-  const result = RegexParser.parse(tc.text);
+  const result = RegexParser.parse(tc.text, (tc as any).senderHint);
   if (!result) {
     console.error(`❌ FAILED: ${tc.name} returned null`);
     continue;

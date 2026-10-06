@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "react-native": ["./scripts/mocks/react-native.js"],
+      "expo-sqlite": ["./scripts/mocks/expo-sqlite.js"]
+    }
+  }
+}

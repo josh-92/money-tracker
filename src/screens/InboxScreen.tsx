@@ -16,6 +16,9 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  Modal,
+  Platform,
+  AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -27,16 +30,21 @@ import {
   AlertCircle,
   Inbox,
   RefreshCw,
+  Wallet,
+  Plus,
+  BellRing,
 } from 'lucide-react-native';
 import { spacing, layout, borderRadius } from '../theme/spacing';
 import { typography } from '../theme/typography';
 import { darkTheme, lightTheme, ColorTheme } from '../theme/colors';
 import { VaultCard } from '../components/VaultCard';
 import { ProviderLogo } from '../components/ProviderLogo';
-import { Transaction } from '../types/database';
+import { Transaction, Account } from '../types/database';
 import { dbService } from '../database/DatabaseService';
 import { useBalanceVisibility } from '../context/BalanceVisibilityContext';
 import { ingestionPipeline } from '../ingestion/IngestionPipeline';
+import { notificationSource } from '../ingestion/sources/NotificationSource';
+import { clipboardSource } from '../ingestion/sources/ClipboardSource';
 
 interface InboxScreenProps {
   navigation: any;
@@ -50,39 +58,90 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
   const theme: ColorTheme = isDark ? darkTheme : lightTheme;
   const { formatAmount } = useBalanceVisibility();
   const [pendingTransactions, setPendingTransactions] = useState<Transaction[]>([]);
+  const [userAccounts, setUserAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
+  const [assigningTx, setAssigningTx] = useState<Transaction | null>(null);
+  const [isPermissionGranted, setIsPermissionGranted] = useState(true);
 
-  const loadPending = async () => {
+  const loadData = async () => {
     try {
       setLoading(true);
-      const items = await dbService.getTransactions({ status: 'PENDING_REVIEW', limit: 50 });
+      if (Platform.OS === 'android') {
+        setIsPermissionGranted(notificationSource.isPermissionGranted());
+        // Auto-check clipboard when viewing review inbox
+        await clipboardSource.checkClipboard().catch(() => {});
+      }
+      const [items, accounts] = await Promise.all([
+        dbService.getTransactions({ status: 'PENDING_REVIEW', limit: 50 }),
+        dbService.getAccounts(),
+      ]);
       setPendingTransactions(items);
+      setUserAccounts(accounts);
     } catch (err) {
-      console.error('Error loading pending transactions:', err);
+      console.error('Error loading inbox data:', err);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadPending();
-    const unsubscribeFocus = navigation.addListener?.('focus', loadPending);
+    loadData();
+    const unsubscribeFocus = navigation.addListener?.('focus', loadData);
     const unsubscribeIngestion = ingestionPipeline.subscribe(() => {
-      loadPending();
+      loadData();
+    });
+    const subAppState = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        loadData();
+      }
     });
 
     return () => {
       if (typeof unsubscribeFocus === 'function') unsubscribeFocus();
       unsubscribeIngestion();
+      subAppState.remove();
     };
   }, [navigation]);
 
   const handleConfirm = async (tx: Transaction) => {
+    if (!tx.accountId) {
+      // Transaction has no matched account
+      if (userAccounts.length === 0) {
+        Alert.alert(
+          'No Account Available',
+          'You have not created any accounts yet. Please create an account in the Accounts tab before confirming this transaction into your ledger.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Manage Accounts',
+              onPress: () => navigation.navigate('ManageAccountsModal'),
+            },
+          ]
+        );
+        return;
+      }
+      // Prompt user to select an account
+      setAssigningTx(tx);
+      return;
+    }
+
     try {
       await dbService.confirmTransaction(tx.id);
       setPendingTransactions((prev) => prev.filter((item) => item.id !== tx.id));
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to confirm transaction.');
+    }
+  };
+
+  const handleAssignAndConfirm = async (account: Account) => {
+    if (!assigningTx) return;
+    try {
+      await dbService.assignAccountToTransaction(assigningTx.id, account.id);
+      await dbService.confirmTransaction(assigningTx.id);
+      setPendingTransactions((prev) => prev.filter((item) => item.id !== assigningTx.id));
+      setAssigningTx(null);
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to assign account and confirm transaction.');
     }
   };
 
@@ -116,7 +175,10 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
         </View>
         <TouchableOpacity
           style={styles.refreshButton}
-          onPress={loadPending}
+          onPress={async () => {
+            clipboardSource.resetCache();
+            await loadData();
+          }}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           <RefreshCw size={18} color={theme.textSecondary} />
@@ -130,6 +192,31 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
       ) : pendingTransactions.length === 0 ? (
         /* Empty State */
         <View style={styles.centerContainer}>
+          {!isPermissionGranted && Platform.OS === 'android' && (
+            <VaultCard isDark={isDark} style={styles.permissionBanner} variant="highlight">
+              <View style={styles.permissionBannerRow}>
+                <View style={[styles.permissionIconCircle, { backgroundColor: '#F59E0B20' }]}>
+                  <BellRing size={20} color="#F59E0B" />
+                </View>
+                <View style={{ flex: 1, marginLeft: spacing.sm }}>
+                  <Text style={[styles.permissionBannerTitle, { color: theme.textPrimary }]}>
+                    Android Notification Access Disabled
+                  </Text>
+                  <Text style={[styles.permissionBannerBody, { color: theme.textSecondary }]}>
+                    Enable access to automatically capture alerts from CBE, Telebirr, and Awash.
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.enableAccessButton}
+                    onPress={() => notificationSource.openNotificationAccessSettings()}
+                  >
+                    <Text style={[styles.enableAccessButtonText, { color: theme.primary }]}>
+                      Enable Notification Access →
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </VaultCard>
+          )}
           <View style={[styles.emptyIconCircle, { backgroundColor: theme.incomeBackground }]}>
             <CheckCircle2 size={44} color={theme.income} />
           </View>
@@ -143,6 +230,31 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
+          {!isPermissionGranted && Platform.OS === 'android' && (
+            <VaultCard isDark={isDark} style={[styles.permissionBanner, { marginBottom: spacing.md }]} variant="highlight">
+              <View style={styles.permissionBannerRow}>
+                <View style={[styles.permissionIconCircle, { backgroundColor: '#F59E0B20' }]}>
+                  <BellRing size={20} color="#F59E0B" />
+                </View>
+                <View style={{ flex: 1, marginLeft: spacing.sm }}>
+                  <Text style={[styles.permissionBannerTitle, { color: theme.textPrimary }]}>
+                    Android Notification Access Disabled
+                  </Text>
+                  <Text style={[styles.permissionBannerBody, { color: theme.textSecondary }]}>
+                    Enable access to automatically capture alerts from CBE, Telebirr, and Awash.
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.enableAccessButton}
+                    onPress={() => notificationSource.openNotificationAccessSettings()}
+                  >
+                    <Text style={[styles.enableAccessButtonText, { color: theme.primary }]}>
+                      Enable Notification Access →
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </VaultCard>
+          )}
           <Text style={[styles.noticeText, { color: theme.textSecondary }]}>
             Verify and confirm detected transactions below to update your ledger.
           </Text>
@@ -160,10 +272,17 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
                 {/* Provider and Confidence Row */}
                 <View style={styles.cardTopRow}>
                   <View style={styles.providerRow}>
-                    <ProviderLogo providerKey={tx.accountName || 'CBE'} size={24} />
-                    <Text style={[styles.accountLabel, { color: theme.textSecondary }]}>
-                      {tx.accountName || 'Primary Account'}
-                    </Text>
+                    <ProviderLogo providerKey={tx.accountId ? (tx.accountName || 'CBE') : 'CUSTOM'} size={24} />
+                    <View style={{ flexDirection: 'column' }}>
+                      <Text style={[styles.accountLabel, { color: theme.textSecondary }]}>
+                        {tx.accountId ? (tx.accountName || 'Primary Account') : 'Unassigned Account'}
+                      </Text>
+                      {!tx.accountId && (
+                        <Text style={{ fontSize: 10, color: theme.warning, fontWeight: typography.fontWeight.medium }}>
+                          Tap Confirm to assign
+                        </Text>
+                      )}
+                    </View>
                   </View>
                   <View
                     style={[
@@ -268,6 +387,54 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
           })}
         </ScrollView>
       )}
+
+      {/* Account Selection Modal for Unassigned Transactions */}
+      <Modal
+        visible={assigningTx !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAssigningTx(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.surface, borderColor: theme.surfaceBorder }]}>
+            <View style={styles.modalHeader}>
+              <View style={[styles.modalIconCircle, { backgroundColor: theme.primaryGlow }]}>
+                <Wallet size={22} color={theme.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Assign to Account</Text>
+                <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
+                  Select which account this {assigningTx?.cleanMerchant || 'transaction'} belongs to:
+                </Text>
+              </View>
+            </View>
+
+            <ScrollView style={styles.accountList} showsVerticalScrollIndicator={false}>
+              {userAccounts.map((acc) => (
+                <TouchableOpacity
+                  key={acc.id}
+                  style={[styles.accountOption, { borderColor: theme.surfaceBorder, backgroundColor: theme.surfaceHighlight }]}
+                  onPress={() => handleAssignAndConfirm(acc)}
+                >
+                  <ProviderLogo providerKey={acc.providerKey} size={28} />
+                  <View style={{ flex: 1, marginLeft: 12 }}>
+                    <Text style={[styles.accountOptionName, { color: theme.textPrimary }]}>{acc.name}</Text>
+                    <Text style={[styles.accountOptionMask, { color: theme.textMuted }]}>{acc.accountMask}</Text>
+                  </View>
+                  <Text style={[styles.assignActionText, { color: theme.primary }]}>Select</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={[styles.modalCancelBtn, { borderColor: theme.surfaceBorder }]}
+              onPress={() => setAssigningTx(null)}
+            >
+              <Text style={[styles.modalCancelBtnText, { color: theme.textSecondary }]}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -455,5 +622,109 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     textAlign: 'center',
     lineHeight: 20,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: layout.screenPaddingHorizontal,
+  },
+  modalContent: {
+    width: '100%',
+    maxHeight: '80%',
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    padding: spacing.lg,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: spacing.md,
+  },
+  modalIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalTitle: {
+    fontSize: typography.fontSize.lg,
+    fontWeight: typography.fontWeight.bold,
+  },
+  modalSubtitle: {
+    fontSize: typography.fontSize.xs,
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  accountList: {
+    maxHeight: 260,
+    marginVertical: spacing.sm,
+  },
+  accountOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: spacing.md,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    marginBottom: spacing.sm,
+  },
+  accountOptionName: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+  },
+  accountOptionMask: {
+    fontSize: typography.fontSize.xs,
+    marginTop: 2,
+  },
+  assignActionText: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.bold,
+  },
+  modalCancelBtn: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    marginTop: spacing.sm,
+  },
+  modalCancelBtnText: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+  },
+  permissionBanner: {
+    marginBottom: spacing.md,
+    width: '100%',
+  },
+  permissionBannerRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  permissionIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  permissionBannerTitle: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.bold,
+  },
+  permissionBannerBody: {
+    fontSize: typography.fontSize.xs,
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  enableAccessButton: {
+    marginTop: spacing.xs,
+    alignSelf: 'flex-start',
+    paddingVertical: 4,
+  },
+  enableAccessButtonText: {
+    fontSize: typography.fontSize.xs,
+    fontWeight: typography.fontWeight.bold,
   },
 });

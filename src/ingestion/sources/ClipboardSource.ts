@@ -20,6 +20,7 @@ export class ClipboardSource implements TransactionSource {
   private messageHandler: ((msg: CandidateMessage) => Promise<IngestionResult>) | null = null;
   private lastProcessedContent: string = '';
   private appStateSubscription: any = null;
+  private clipboardListenerSubscription: any = null;
 
   public onMessage(handler: (msg: CandidateMessage) => Promise<IngestionResult>): void {
     this.messageHandler = handler;
@@ -29,11 +30,24 @@ export class ClipboardSource implements TransactionSource {
     if (this.isRunning) return;
     this.isRunning = true;
 
-    // Run an initial check
+    // Run an initial check on startup
     await this.checkClipboard();
 
-    // Check whenever app returns to active/foreground
+    // 1. Check whenever app transitions from background to active/foreground
     this.appStateSubscription = AppState.addEventListener('change', this.handleAppStateChange);
+
+    // 2. Attach live clipboard change listener if supported by platform
+    try {
+      if (typeof Clipboard.addClipboardListener === 'function') {
+        this.clipboardListenerSubscription = Clipboard.addClipboardListener(() => {
+          if (this.isRunning && AppState.currentState === 'active') {
+            this.checkClipboard();
+          }
+        });
+      }
+    } catch (err) {
+      console.warn('Live clipboard listener not supported:', err);
+    }
   }
 
   public async stop(): Promise<void> {
@@ -42,11 +56,24 @@ export class ClipboardSource implements TransactionSource {
       this.appStateSubscription.remove();
       this.appStateSubscription = null;
     }
+    if (this.clipboardListenerSubscription) {
+      this.clipboardListenerSubscription.remove();
+      this.clipboardListenerSubscription = null;
+    }
   }
 
   private handleAppStateChange = async (nextAppState: AppStateStatus): Promise<void> => {
+    console.log(`[CLIPBOARD:JS] appStateChange: nextAppState=${nextAppState}, isRunning=${this.isRunning}`);
     if (nextAppState === 'active' && this.isRunning) {
-      await this.checkClipboard();
+      // Delay 250ms to allow Android window focus to settle
+      setTimeout(() => {
+        this.checkClipboard().catch((err) => {
+          console.warn('[CLIPBOARD:JS] Error in checkClipboard timeout:', err);
+        });
+      }, 250);
+    } else if (nextAppState !== 'active') {
+      // Reset cache when leaving app so user can re-copy or copy new text
+      this.resetCache();
     }
   };
 
@@ -55,16 +82,42 @@ export class ClipboardSource implements TransactionSource {
    */
   public async checkClipboard(): Promise<CandidateMessage | null> {
     try {
-      const hasString = await Clipboard.hasStringAsync();
-      if (!hasString) return null;
+      console.log(`[CLIPBOARD:JS] checkClipboard invoked (currentState=${AppState.currentState})`);
 
-      const text = await Clipboard.getStringAsync();
-      if (!text || !text.trim()) return null;
+      let hasString = false;
+      try {
+        hasString = await Clipboard.hasStringAsync();
+      } catch (err) {
+        console.warn('[CLIPBOARD:JS] hasStringAsync error:', err);
+      }
+      console.log(`[CLIPBOARD:JS] hasStringAsync=${hasString}`);
+
+      let text = '';
+      try {
+        text = await Clipboard.getStringAsync();
+      } catch (err) {
+        console.warn('[CLIPBOARD:JS] getStringAsync error:', err);
+      }
+
+      // If empty on first attempt right after resume, retry once after 250ms to handle Android window focus latency
+      if (!text || !text.trim()) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        try {
+          text = await Clipboard.getStringAsync();
+        } catch {}
+      }
+
+      if (!text || !text.trim()) {
+        console.log('[CLIPBOARD:JS] Clipboard contains no text.');
+        return null;
+      }
 
       const trimmed = text.trim();
+      console.log(`[CLIPBOARD:JS] Read clipboard text: length=${trimmed.length}, preview="${trimmed.substring(0, 40)}..."`);
 
-      // Don't re-process identical clipboard content
+      // Don't re-process identical clipboard content in the same foreground session
       if (trimmed === this.lastProcessedContent) {
+        console.log('[CLIPBOARD:JS] Identical clipboard content already processed in this session.');
         return null;
       }
 
@@ -77,22 +130,25 @@ export class ClipboardSource implements TransactionSource {
       };
 
       const detection = ProviderDetector.detect(candidate);
+      console.log(`[CLIPBOARD:JS] ProviderDetector: isCandidate=${detection.isCandidate}, provider=${detection.provider}, reason=${detection.reason || 'OK'}`);
+
       if (!detection.isCandidate) {
-        // Not a bank notification, update last processed so we don't evaluate it again
-        this.lastProcessedContent = trimmed;
+        console.log(`[CLIPBOARD:JS] Discarded non-banking candidate: ${detection.reason || 'Not a banking message'}`);
         return null;
       }
 
-      // Mark as processed
-      this.lastProcessedContent = trimmed;
-
       if (this.messageHandler) {
-        await this.messageHandler(candidate);
+        console.log(`[CLIPBOARD:JS] Forwarding clipboard candidate (${candidate.id}) to IngestionPipeline`);
+        const result = await this.messageHandler(candidate);
+        // Only mark as processed if pipeline accepted and parsed it
+        if (result && result.success && result.status !== 'UNPARSED') {
+          this.lastProcessedContent = trimmed;
+        }
       }
 
       return candidate;
     } catch (err) {
-      console.warn('Failed to read clipboard:', err);
+      console.warn('[CLIPBOARD:JS] Failed to read clipboard:', err);
       return null;
     }
   }

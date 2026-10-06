@@ -4,24 +4,23 @@
     "slug": "money-tracker",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/android/playstore-icon.png",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "backgroundColor": "#f0f0fa",
+        "foregroundImage": "./assets/android/mipmap-xxxhdpi/ic_launcher_foreground.png"
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.moneytracker.app"
     },
     "plugins": [
       "./plugins/withNotificationListener.js",
-      "expo-dev-client"
+      "expo-dev-client",
+      "expo-sqlite"
     ],
     "web": {
       "favicon": "./assets/favicon.png"

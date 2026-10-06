@@ -36,7 +36,7 @@ interface OnboardingScreenProps {
 export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, isDark = true }) => {
   const theme: ColorTheme = isDark ? darkTheme : lightTheme;
 
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [step, setStep] = useState<1 | 2>(1);
 
   // Step 1: Vault Profile
   const [fullName, setFullName] = useState('');
@@ -44,19 +44,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
   const [phoneNumber, setPhoneNumber] = useState('');
   const [password, setPassword] = useState('');
 
-  // Step 2: Accounts & Balances
-  const [selectedAccounts, setSelectedAccounts] = useState({
-    cbe: true,
-    telebirr: true,
-    awash: true,
-    cash: true,
-  });
-  const [cbeBalance, setCbeBalance] = useState('7250');
-  const [telebirrBalance, setTelebirrBalance] = useState('3100');
-  const [awashBalance, setAwashBalance] = useState('2100');
-  const [cashBalance, setCashBalance] = useState('850');
-
-  // Step 3: Security & Passcode
+  // Step 2: Security & Passcode
   const [passcode, setPasscode] = useState('');
   const [confirmPasscode, setConfirmPasscode] = useState('');
   const [biometricEnabled, setBiometricEnabled] = useState(false);
@@ -77,10 +65,6 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
       return;
     }
     setStep(2);
-  };
-
-  const handleStep2Next = () => {
-    setStep(3);
   };
 
   const handleCompleteSetup = async (skipPasscode = false) => {
@@ -113,7 +97,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
           ? await vaultSecurity.hashPasscode(passcode, salt)
           : null;
 
-      // 3. Create Vault Profile in SQLite
+      // 3. Create Vault Profile in SQLite (No automatic accounts or balances seeded)
       await dbService.createVaultProfile({
         fullName: fullName.trim(),
         email: email.trim(),
@@ -125,15 +109,6 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
         autoLockMinutes: 5,
         themePreference: isDark ? 'dark' : 'light',
       });
-
-      // 4. Seed Chosen Accounts and Initial Opening Balances
-      const balancesMap: Record<string, number> = {};
-      if (selectedAccounts.cbe) balancesMap['acc_cbe'] = parseFloat(cbeBalance) || 0;
-      if (selectedAccounts.telebirr) balancesMap['acc_telebirr'] = parseFloat(telebirrBalance) || 0;
-      if (selectedAccounts.awash) balancesMap['acc_awash'] = parseFloat(awashBalance) || 0;
-      if (selectedAccounts.cash) balancesMap['acc_cash'] = parseFloat(cashBalance) || 0;
-
-      await dbService.seedDefaultAccounts(balancesMap);
 
       onComplete();
     } catch (err: any) {
@@ -148,7 +123,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         {/* Step Indicator */}
         <View style={styles.stepIndicatorRow}>
-          {[1, 2, 3].map((s) => (
+          {[1, 2].map((s) => (
             <View
               key={s}
               style={[
@@ -218,167 +193,14 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
             </VaultCard>
 
             <TouchableOpacity style={[styles.primaryButton, { backgroundColor: theme.primary }]} onPress={handleStep1Next}>
-              <Text style={styles.buttonText}>Continue to Accounts</Text>
-              <ArrowRight size={18} color="#FFFFFF" style={{ marginLeft: 6 }} />
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* STEP 2: Configure Accounts & Starting Balances */}
-        {step === 2 && (
-          <View>
-            <View style={styles.iconHeader}>
-              <Text style={[styles.title, { color: theme.textPrimary }]}>Your Accounts & Wallets</Text>
-              <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
-                Select the accounts you actively use and enter their starting balances. These form immutable starting points for future cash-flow tracking.
-              </Text>
-            </View>
-
-            {/* CBE Account */}
-            <VaultCard isDark={isDark} style={styles.accountRowCard}>
-              <View style={styles.accountRowHeader}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-                  <ProviderLogo providerKey="CBE" size={32} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.accountTitle, { color: theme.textPrimary }]}>Commercial Bank of Ethiopia (CBE)</Text>
-                    <Text style={[styles.accountMask, { color: theme.textSecondary }]}>Primary Salary / Savings</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={selectedAccounts.cbe}
-                  onValueChange={(val) => setSelectedAccounts({ ...selectedAccounts, cbe: val })}
-                  trackColor={{ false: theme.surfaceBorder, true: theme.primary }}
-                />
-              </View>
-              {selectedAccounts.cbe && (
-                <View>
-                  <View style={styles.balanceInputContainer}>
-                    <Text style={[styles.balanceInputLabel, { color: theme.textSecondary }]}>Starting Balance (ETB):</Text>
-                    <TextInput
-                      style={[styles.smallInput, { backgroundColor: theme.surfaceHighlight, color: theme.textPrimary, borderColor: theme.surfaceBorder }]}
-                      keyboardType="numeric"
-                      value={cbeBalance}
-                      onChangeText={setCbeBalance}
-                    />
-                  </View>
-                  <Text style={[styles.openingBalanceDisclosure, { color: theme.textMuted }]}>
-                    This will be used as your opening balance
-                  </Text>
-                </View>
-              )}
-            </VaultCard>
-
-            {/* Telebirr Wallet */}
-            <VaultCard isDark={isDark} style={styles.accountRowCard}>
-              <View style={styles.accountRowHeader}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-                  <ProviderLogo providerKey="TELEBIRR" size={32} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.accountTitle, { color: theme.textPrimary }]}>Telebirr Mobile Wallet</Text>
-                    <Text style={[styles.accountMask, { color: theme.textSecondary }]}>Daily Retail & QR Payments</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={selectedAccounts.telebirr}
-                  onValueChange={(val) => setSelectedAccounts({ ...selectedAccounts, telebirr: val })}
-                  trackColor={{ false: theme.surfaceBorder, true: theme.primary }}
-                />
-              </View>
-              {selectedAccounts.telebirr && (
-                <View>
-                  <View style={styles.balanceInputContainer}>
-                    <Text style={[styles.balanceInputLabel, { color: theme.textSecondary }]}>Starting Balance (ETB):</Text>
-                    <TextInput
-                      style={[styles.smallInput, { backgroundColor: theme.surfaceHighlight, color: theme.textPrimary, borderColor: theme.surfaceBorder }]}
-                      keyboardType="numeric"
-                      value={telebirrBalance}
-                      onChangeText={setTelebirrBalance}
-                    />
-                  </View>
-                  <Text style={[styles.openingBalanceDisclosure, { color: theme.textMuted }]}>
-                    This will be used as your opening balance
-                  </Text>
-                </View>
-              )}
-            </VaultCard>
-
-            {/* Awash Bank */}
-            <VaultCard isDark={isDark} style={styles.accountRowCard}>
-              <View style={styles.accountRowHeader}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-                  <ProviderLogo providerKey="AWASH" size={32} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.accountTitle, { color: theme.textPrimary }]}>Awash Bank</Text>
-                    <Text style={[styles.accountMask, { color: theme.textSecondary }]}>Secondary Bank Account</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={selectedAccounts.awash}
-                  onValueChange={(val) => setSelectedAccounts({ ...selectedAccounts, awash: val })}
-                  trackColor={{ false: theme.surfaceBorder, true: theme.primary }}
-                />
-              </View>
-              {selectedAccounts.awash && (
-                <View>
-                  <View style={styles.balanceInputContainer}>
-                    <Text style={[styles.balanceInputLabel, { color: theme.textSecondary }]}>Starting Balance (ETB):</Text>
-                    <TextInput
-                      style={[styles.smallInput, { backgroundColor: theme.surfaceHighlight, color: theme.textPrimary, borderColor: theme.surfaceBorder }]}
-                      keyboardType="numeric"
-                      value={awashBalance}
-                      onChangeText={setAwashBalance}
-                    />
-                  </View>
-                  <Text style={[styles.openingBalanceDisclosure, { color: theme.textMuted }]}>
-                    This will be used as your opening balance
-                  </Text>
-                </View>
-              )}
-            </VaultCard>
-
-            {/* Cash in Hand */}
-            <VaultCard isDark={isDark} style={styles.accountRowCard}>
-              <View style={styles.accountRowHeader}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-                  <ProviderLogo providerKey="CASH" size={32} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.accountTitle, { color: theme.textPrimary }]}>Cash in Hand</Text>
-                    <Text style={[styles.accountMask, { color: theme.textSecondary }]}>Physical Wallet (Taxis, Gulit)</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={selectedAccounts.cash}
-                  onValueChange={(val) => setSelectedAccounts({ ...selectedAccounts, cash: val })}
-                  trackColor={{ false: theme.surfaceBorder, true: theme.primary }}
-                />
-              </View>
-              {selectedAccounts.cash && (
-                <View>
-                  <View style={styles.balanceInputContainer}>
-                    <Text style={[styles.balanceInputLabel, { color: theme.textSecondary }]}>Starting Balance (ETB):</Text>
-                    <TextInput
-                      style={[styles.smallInput, { backgroundColor: theme.surfaceHighlight, color: theme.textPrimary, borderColor: theme.surfaceBorder }]}
-                      keyboardType="numeric"
-                      value={cashBalance}
-                      onChangeText={setCashBalance}
-                    />
-                  </View>
-                  <Text style={[styles.openingBalanceDisclosure, { color: theme.textMuted }]}>
-                    This will be used as your opening balance
-                  </Text>
-                </View>
-              )}
-            </VaultCard>
-
-            <TouchableOpacity style={[styles.primaryButton, { backgroundColor: theme.primary }]} onPress={handleStep2Next}>
               <Text style={styles.buttonText}>Continue to Security</Text>
               <ArrowRight size={18} color="#FFFFFF" style={{ marginLeft: 6 }} />
             </TouchableOpacity>
           </View>
         )}
 
-        {/* STEP 3: Security & Passcode */}
-        {step === 3 && (
+        {/* STEP 2: Security & Passcode */}
+        {step === 2 && (
           <View>
             <View style={styles.iconHeader}>
               <View style={[styles.iconCircle, { backgroundColor: theme.primaryGlow }]}>

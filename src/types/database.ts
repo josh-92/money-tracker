@@ -100,7 +100,7 @@ export interface OpeningBalance {
 export interface Transaction {
   // Primary Keys & Relationships
   id: string;
-  accountId: string;
+  accountId: string | null; // Nullable when transaction is unmatched/unassigned
   destinationAccountId?: string | null; // Set when type === 'TRANSFER'
 
   // --- Current Active State (User-editable or active interpretation) ---

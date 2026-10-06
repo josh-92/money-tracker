@@ -8,22 +8,25 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { View, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, ActivityIndicator, StyleSheet, AppState } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as ScreenCapture from 'expo-screen-capture';
 import { dbService } from './src/database/DatabaseService';
+import { sessionManager } from './src/security/SessionManager';
 import { RootNavigator } from './src/navigation/RootNavigator';
 import { OnboardingScreen } from './src/screens/OnboardingScreen';
 import { darkTheme } from './src/theme/colors';
 
 export default function App() {
-  // Enforces Android FLAG_SECURE: blocks screenshots and masks financial preview in App-Switcher
-  ScreenCapture.usePreventScreenCapture();
-
   const [isLoading, setIsLoading] = useState(true);
   const [hasVaultProfile, setHasVaultProfile] = useState(false);
   const [isDark, setIsDark] = useState(true);
+
+  // Safely enforce Android FLAG_SECURE without fragile unmount teardown
+  const enforceScreenCaptureProtection = () => {
+    ScreenCapture.preventScreenCaptureAsync().catch(() => {});
+  };
 
   const initializeApp = async () => {
     try {
@@ -34,6 +37,7 @@ export default function App() {
       if (profile) {
         setHasVaultProfile(true);
         setIsDark(profile.themePreference !== 'light');
+        await sessionManager.init(profile.autoLockMinutes ?? 5);
       } else {
         setHasVaultProfile(false);
       }
@@ -46,6 +50,12 @@ export default function App() {
 
   useEffect(() => {
     initializeApp();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        enforceScreenCaptureProtection();
+      }
+    });
+    return () => sub.remove();
   }, []);
 
   const handleOnboardingComplete = async () => {

@@ -411,6 +411,29 @@ export const AccountSecurityScreen: React.FC<AccountSecurityScreenProps> = ({
             </View>
           </View>
         </VaultCard>
+
+        {/* Immediate Manual Lock */}
+        <Text style={[styles.sectionHeader, { color: theme.textSecondary }]}>Manual Vault Lockdown</Text>
+        <VaultCard isDark={isDark} style={styles.card}>
+          <TouchableOpacity
+            style={styles.manualLockRow}
+            onPress={() => sessionManager.lock()}
+            activeOpacity={0.7}
+          >
+            <View style={[styles.iconCircle, { backgroundColor: theme.primaryGlow }]}>
+              <Lock size={18} color={theme.primary} />
+            </View>
+            <View style={{ marginLeft: spacing.sm, flex: 1 }}>
+              <Text style={[styles.itemTitle, { color: theme.textPrimary }]}>Lock Vault Immediately</Text>
+              <Text style={[styles.itemSubtitle, { color: theme.textSecondary }]}>
+                Require PIN or biometric authentication now
+              </Text>
+            </View>
+            <Text style={{ color: theme.primary, fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.xs }}>
+              LOCK NOW
+            </Text>
+          </TouchableOpacity>
+        </VaultCard>
       </ScrollView>
     </SafeAreaView>
   );
@@ -552,5 +575,17 @@ const styles = StyleSheet.create({
   safeguardDesc: {
     fontSize: typography.fontSize.xs,
     marginTop: 2,
+  },
+  manualLockRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.xs,
+  },
+  iconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

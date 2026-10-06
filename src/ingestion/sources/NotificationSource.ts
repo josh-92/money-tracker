@@ -9,7 +9,7 @@
  * - Filters incoming notifications with ProviderDetector before emitting.
  */
 
-import { Platform, Linking } from 'react-native';
+import { Platform, Linking, AppState, AppStateStatus } from 'react-native';
 import { CandidateMessage, TransactionSource, IngestionResult } from '../types';
 import { ProviderDetector } from '../ProviderDetector';
 import {
@@ -18,6 +18,7 @@ import {
   isNotificationPermissionGranted,
   isNotificationServiceConnected,
   openNotificationListenerSettings,
+  drainPendingNotifications,
 } from '../../../modules/banking-notification';
 
 export class NotificationSource implements TransactionSource {
@@ -25,6 +26,7 @@ export class NotificationSource implements TransactionSource {
   private isRunning = false;
   private messageHandler: ((msg: CandidateMessage) => Promise<IngestionResult>) | null = null;
   private nativeSubscription: any = null;
+  private appStateSubscription: any = null;
 
   public onMessage(handler: (msg: CandidateMessage) => Promise<IngestionResult>): void {
     this.messageHandler = handler;
@@ -44,6 +46,31 @@ export class NotificationSource implements TransactionSource {
       } catch (err) {
         console.warn('Native notification listener not initialized:', err);
       }
+
+      // Drain any notifications received prior to subscription
+      await this.drainPending();
+
+      // Drain pending notifications on app resume
+      this.appStateSubscription = AppState.addEventListener('change', (state: AppStateStatus) => {
+        if (state === 'active' && this.isRunning) {
+          this.drainPending();
+        }
+      });
+    }
+  }
+
+  public async drainPending(): Promise<void> {
+    if (!this.isRunning || Platform.OS !== 'android') return;
+    try {
+      const pending = drainPendingNotifications();
+      if (pending && pending.length > 0) {
+        console.log(`[JS] drainPendingNotifications returned ${pending.length} queued item(s)`);
+        for (const item of pending) {
+          await this.handleNativeNotification(item);
+        }
+      }
+    } catch (err) {
+      console.warn('[JS] Failed to drain pending notifications:', err);
     }
   }
 
@@ -52,6 +79,10 @@ export class NotificationSource implements TransactionSource {
     if (this.nativeSubscription) {
       this.nativeSubscription.remove();
       this.nativeSubscription = null;
+    }
+    if (this.appStateSubscription) {
+      this.appStateSubscription.remove();
+      this.appStateSubscription = null;
     }
   }
 
@@ -66,22 +97,29 @@ export class NotificationSource implements TransactionSource {
   }): Promise<void> => {
     if (!this.isRunning || !event || !event.rawText) return;
 
+    console.log(`[NOTIF:JS] received: pkg=${event.packageName || 'unknown'}, title="${event.title || ''}", textLen=${event.rawText.length}`);
+
     const candidate: CandidateMessage = {
       id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       source: 'NOTIFICATION',
       rawText: event.rawText,
       packageName: event.packageName,
       title: event.title,
+      senderHint: event.title,
       timestamp: event.timestamp || new Date().toISOString(),
     };
 
     // Instant privacy gate: Discard if not a candidate banking notification
     const detection = ProviderDetector.detect(candidate);
+    console.log(`[NOTIF:PROVIDER] isCandidate=${detection.isCandidate}, provider=${detection.provider}, template=${detection.templateCategory}, reason=${detection.reason || 'OK'}`);
+
     if (!detection.isCandidate) {
+      console.log(`[NOTIF:JS] Discarded non-banking candidate: ${detection.reason || 'Not a banking message'}`);
       return;
     }
 
     if (this.messageHandler) {
+      console.log(`[NOTIF:JS] Forwarding notification candidate (${candidate.id}) to IngestionPipeline`);
       await this.messageHandler(candidate);
     }
   };

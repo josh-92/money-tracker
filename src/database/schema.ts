@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS categories (
 -- 5. Transactions (The Core Auditable Ledger)
 CREATE TABLE IF NOT EXISTS transactions (
     id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL,
+    account_id TEXT, -- Nullable when transaction is unmatched/unassigned
     destination_account_id TEXT, -- Populated only if type is 'TRANSFER'
     
     -- Current Active / User-Editable Values
@@ -100,8 +100,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
 
-    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE RESTRICT,
-    FOREIGN KEY(destination_account_id) REFERENCES accounts(id) ON DELETE RESTRICT,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL,
+    FOREIGN KEY(destination_account_id) REFERENCES accounts(id) ON DELETE SET NULL,
     FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE SET NULL,
     FOREIGN KEY(original_category_id) REFERENCES categories(id) ON DELETE SET NULL
 );

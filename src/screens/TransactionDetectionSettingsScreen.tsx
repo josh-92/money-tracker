@@ -21,6 +21,7 @@ import {
   Switch,
   Alert,
   Platform,
+  AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -71,8 +72,16 @@ export const TransactionDetectionSettingsScreen: React.FC<Props> = ({
 
   React.useEffect(() => {
     checkNativeStatus();
-    const unsubscribe = navigation.addListener?.('focus', checkNativeStatus);
-    return typeof unsubscribe === 'function' ? unsubscribe : undefined;
+    const unsubscribeFocus = navigation.addListener?.('focus', checkNativeStatus);
+    const subAppState = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        checkNativeStatus();
+      }
+    });
+    return () => {
+      if (typeof unsubscribeFocus === 'function') unsubscribeFocus();
+      subAppState.remove();
+    };
   }, [navigation]);
 
   const handleOpenSystemSettings = async () => {

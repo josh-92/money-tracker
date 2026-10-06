@@ -39,3 +39,17 @@ export function openNotificationListenerSettings(): void {
     // Handled by Linking fallback in NotificationSource
   }
 }
+
+export function drainPendingNotifications(): Array<{
+  rawText: string;
+  packageName?: string;
+  title?: string;
+  timestamp?: string;
+}> {
+  try {
+    return BankingNotificationModule?.drainPendingNotifications() ?? [];
+  } catch {
+    return [];
+  }
+}
+

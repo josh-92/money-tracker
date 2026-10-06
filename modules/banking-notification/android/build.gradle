@@ -9,6 +9,7 @@ def safeExtGet(prop, fallback) {
 }
 
 android {
+  namespace "com.moneytracker.notification"
   compileSdkVersion safeExtGet("compileSdkVersion", 35)
 
   defaultConfig {

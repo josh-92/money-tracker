@@ -82,16 +82,31 @@ export class ProviderDetector {
 
     // Check Sender Shortcode / Title if not resolved
     if (provider === 'UNKNOWN') {
-      if (sender === '127' || sender.includes('TELEBIRR') || title.includes('TELEBIRR')) {
+      if (
+        sender === '127' ||
+        sender.includes('TELEBIRR') ||
+        sender.includes('ETHIOTELECOM') ||
+        title === '127' ||
+        title.includes('TELEBIRR') ||
+        title.includes('ቴሌብር')
+      ) {
         provider = 'TELEBIRR';
       } else if (
         sender.includes('CBE') ||
         sender.includes('COMMERCIAL BANK') ||
+        sender === '951' ||
         title.includes('CBE') ||
-        title.includes('COMMERCIAL BANK OF ETHIOPIA')
+        title.includes('COMMERCIAL BANK') ||
+        title.includes('951')
       ) {
         provider = 'CBE';
-      } else if (sender.includes('AWASH') || title.includes('AWASH')) {
+      } else if (
+        sender.includes('AWASH') ||
+        sender === '8900' ||
+        title.includes('AWASH') ||
+        title.includes('8900') ||
+        title.includes('አዋሽ')
+      ) {
         provider = 'AWASH';
       }
     }
@@ -101,29 +116,30 @@ export class ProviderDetector {
       if (
         /\b(?:telebirr|127|cn\.tydic\.ethiopay)\b/i.test(raw) ||
         /ቴሌብር|የቴሌብር/i.test(raw) ||
-        /Transaction\s+number:\s*(?:CR|TR|RC|AT|CO|CI)\d+/i.test(raw) ||
-        /Txn\s+(?:number|ID):\s*(?:CR|TR|RC|AT|CO|CI)\d+/i.test(raw) ||
-        /የግብይት\s*ቁጥር[:\s]*(?:CR|TR|RC|AT|CO|CI)\d+/i.test(raw)
+        /(?:Transaction\s+number|Txn\s+(?:number|ID|No)|Transaction\s+ID)[:\s]*(?:CR|TR|RC|AT|CO|CI)[A-Z0-9]+/i.test(raw) ||
+        /የግብይት\s*ቁጥር[:\s]*(?:CR|TR|RC|AT|CO|CI)[A-Z0-9]+/i.test(raw) ||
+        /(?:transferred|sent)\s+ETB\s+[\d,]+/i.test(raw) ||
+        /(?:ወደ|ለ)\s+.+?\s+የ\s*[\d,]+\s*ብር\s*አስተላልፈዋል/i.test(raw) ||
+        /የ\s*[\d,]+\s*ብር\s*(?:ወደ|ለ)\s+.+?\s*አስተላልፈዋል/i.test(raw)
       ) {
         provider = 'TELEBIRR';
       } else if (
-        /\b(?:CBE|Commercial Bank of Ethiopia)\b/i.test(raw) ||
-        /Acc\.?\s*[*xX\d]+\s+has\s+been\s+(?:debited|credited)/i.test(raw) ||
-        /Ref:\s*FT\d{5,}/i.test(raw) ||
-        /ውድ\s*ደንበኛችን|የሂሳብ\s*ቁጥር\s*[*xX\d]+.*ወጪ\s*ተደርጓል/i.test(raw)
+        /\b(?:CBE|Commercial Bank of Ethiopia|CBEBirr)\b/i.test(raw) ||
+        /(?:Ref|Txn)[:\s]+FT\d{4,}/i.test(raw) ||
+        /ውድ\s*ደንበኛችን|የሂሳብ\s*ቁጥር\s*[*xX\d]+.*(?:ወጪ|ገቢ)\s*ተደርጓል/i.test(raw)
       ) {
         provider = 'CBE';
       } else if (
-        /\b(?:Awash Bank|Awash)\b/i.test(raw) ||
-        /account\s+[*xX\d]+\s+has\s+been\s+(?:debited|credited)\s+(?:by|with)\s+ETB/i.test(raw) ||
-        /Reference:\s*AW\d+/i.test(raw) ||
-        /አዋሽ\s*ባንክ/i.test(raw)
+        /\b(?:Awash Bank|Awash|AwashBirr|8900)\b/i.test(raw) ||
+        /(?:Reference|Ref)[:\s]+AW\d+/i.test(raw) ||
+        /አዋሽ\s*ባንክ|አዋሽ/i.test(raw) ||
+        /(?:account|Acc\.?)\s*[*xX\d]+\s+(?:has\s+been|is|was)?\s*(?:debited|credited)/i.test(raw)
       ) {
         provider = 'AWASH';
       }
     }
 
-    // 4. Privacy Check: If provider is still UNKNOWN and there's no clear Ethiopian bank marker, reject!
+    // 4. Privacy Check: If provider is still UNKNOWN and there's no clear financial marker, reject!
     if (provider === 'UNKNOWN' && !hasFinancialMovement) {
       return {
         isCandidate: false,

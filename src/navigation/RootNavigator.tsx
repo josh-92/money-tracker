@@ -41,6 +41,7 @@ import { ReconcileModal } from '../screens/ReconcileModal';
 import { TransactionDetectionSettingsScreen } from '../screens/TransactionDetectionSettingsScreen';
 import { ImportTransactionsModal } from '../screens/ImportTransactionsModal';
 import { BalanceVisibilityProvider } from '../context/BalanceVisibilityContext';
+import { dbService } from '../database/DatabaseService';
 import { sessionManager } from '../security/SessionManager';
 import { ingestionPipeline } from '../ingestion/IngestionPipeline';
 import { clipboardSource } from '../ingestion/sources/ClipboardSource';
@@ -114,10 +115,22 @@ const TabNavigator: React.FC<RootNavigatorProps> = ({ isDark, onToggleTheme }) =
 };
 
 export const RootNavigator: React.FC<RootNavigatorProps> = ({ isDark, onToggleTheme }) => {
-  const [isLocked, setIsLocked] = useState(false);
+  const [isLocked, setIsLocked] = useState(sessionManager.getIsLocked());
 
   useEffect(() => {
-    sessionManager.init(5); // Default 5 minutes auto-lock
+    // Load and sync configured autoLockMinutes from vault profile
+    const syncSecurityProfile = async () => {
+      try {
+        const profile = await dbService.getVaultProfile();
+        if (profile?.autoLockMinutes) {
+          sessionManager.setAutoLockMinutes(profile.autoLockMinutes);
+        }
+      } catch (err) {
+        console.warn('Failed to sync vault profile auto-lock minutes:', err);
+      }
+    };
+    syncSecurityProfile();
+
     const unsubscribe = sessionManager.subscribe((locked) => {
       setIsLocked(locked);
     });
@@ -130,7 +143,7 @@ export const RootNavigator: React.FC<RootNavigatorProps> = ({ isDark, onToggleTh
 
     return () => {
       unsubscribe();
-      sessionManager.destroy();
+      // Keep sessionManager alive across React component remounts
       clipboardSource.stop();
       notificationSource.stop();
     };

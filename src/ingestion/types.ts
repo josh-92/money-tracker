@@ -48,7 +48,7 @@ export interface NormalizedCandidateTransaction {
   templateId: string;
   confidenceScore: number; // 0.0 - 1.0
   aiOperationUsed?: string;
-  matchedAccountId?: string;
+  matchedAccountId?: string | null;
   destinationAccountId?: string;
 }
 

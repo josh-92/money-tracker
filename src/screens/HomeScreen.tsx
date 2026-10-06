@@ -39,6 +39,25 @@ import { dbService } from '../database/DatabaseService';
 import { Transaction, VaultProfile } from '../types/database';
 import { useBalanceVisibility } from '../context/BalanceVisibilityContext';
 import { ingestionPipeline } from '../ingestion/IngestionPipeline';
+import { GuidedTourOverlay, TourStep } from '../components/GuidedTourOverlay';
+
+const HOME_TOUR_STEPS: TourStep[] = [
+  {
+    title: 'Welcome to Your Private Vault',
+    description: 'Money Tracker runs 100% locally on your phone. Your balances and transaction history are stored in an encrypted offline vault.',
+    badge: 'Privacy First',
+  },
+  {
+    title: 'Total Net Worth & Balance Visibility',
+    description: 'Your combined balance across all active accounts is calculated here. Tap the eye icon anytime to hide or reveal your sensitive figures.',
+    badge: 'Balance Control',
+  },
+  {
+    title: 'Instant Capture & Review Inbox',
+    description: 'Use the quick action buttons to log cash, scan paper receipts, or transfer funds. The top notification bell flags new SMS or bank notifications waiting for your review.',
+    badge: 'Smart Tracking',
+  },
+];
 
 interface HomeScreenProps {
   navigation: any;
@@ -53,6 +72,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, isDark = tru
   const [profile, setProfile] = useState<VaultProfile | null>(null);
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [unconfirmedCount, setUnconfirmedCount] = useState(0);
+  const [monthlyMetrics, setMonthlyMetrics] = useState<{
+    totalExpense: number;
+    topCategories: Array<{ name: string; amount: number; percentage: number }>;
+  } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const loadData = async () => {
@@ -68,6 +91,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, isDark = tru
 
       const pending = await dbService.getTransactions({ status: 'PENDING_REVIEW' });
       setUnconfirmedCount(pending.length);
+
+      const now = new Date();
+      const metrics = await dbService.getMonthlyMetrics(now.getMonth() + 1, now.getFullYear());
+      setMonthlyMetrics(metrics);
     } catch (err) {
       console.error('Error loading home data:', err);
     }
@@ -198,7 +225,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, isDark = tru
           </Text>
 
           <View style={[styles.cardFooter, { borderTopColor: theme.surfaceBorder }]}>
-            <Text style={[styles.cardFooterText, { color: theme.textSecondary }]}>Across CBE, Telebirr, Awash & Cash</Text>
+            <Text style={[styles.cardFooterText, { color: theme.textSecondary }]}>
+              Across your active accounts
+            </Text>
             <TouchableOpacity onPress={() => navigation.navigate('Accounts')}>
               <Text style={[styles.viewDetailsText, { color: theme.primary }]}>View Accounts →</Text>
             </TouchableOpacity>
@@ -234,19 +263,39 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, isDark = tru
         </View>
 
         {/* Contextual Spending Insight */}
-        <VaultCard isDark={isDark} style={styles.insightCard} variant="highlight">
-          <View style={styles.insightRow}>
-            <View style={[styles.insightIconCircle, { backgroundColor: theme.warningBackground }]}>
-              <AlertTriangle size={18} color={theme.warning} />
+        {monthlyMetrics && monthlyMetrics.totalExpense > 0 && monthlyMetrics.topCategories.length > 0 ? (
+          <VaultCard isDark={isDark} style={styles.insightCard} variant="highlight">
+            <View style={styles.insightRow}>
+              <View style={[styles.insightIconCircle, { backgroundColor: theme.warningBackground }]}>
+                <AlertTriangle size={18} color={theme.warning} />
+              </View>
+              <View style={styles.insightTextContainer}>
+                <Text style={[styles.insightTitle, { color: theme.textPrimary }]}>
+                  {new Date().toLocaleString('en-US', { month: 'long' })} Spending Update
+                </Text>
+                <Text style={[styles.insightBody, { color: theme.textSecondary }]}>
+                  {monthlyMetrics.topCategories[0].name} is your largest category ({monthlyMetrics.topCategories[0].amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB). Total monthly spend: {monthlyMetrics.totalExpense.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB.
+                </Text>
+              </View>
             </View>
-            <View style={styles.insightTextContainer}>
-              <Text style={[styles.insightTitle, { color: theme.textPrimary }]}>October Spending Update</Text>
-              <Text style={[styles.insightBody, { color: theme.textSecondary }]}>
-                Food & Dining is your largest category (1,850 ETB). You are within your monthly budget cap.
-              </Text>
+          </VaultCard>
+        ) : (
+          <VaultCard isDark={isDark} style={styles.insightCard} variant="highlight">
+            <View style={styles.insightRow}>
+              <View style={[styles.insightIconCircle, { backgroundColor: theme.incomeBackground }]}>
+                <TrendingUp size={18} color={theme.income} />
+              </View>
+              <View style={styles.insightTextContainer}>
+                <Text style={[styles.insightTitle, { color: theme.textPrimary }]}>
+                  {new Date().toLocaleString('en-US', { month: 'long' })} Spending Update
+                </Text>
+                <Text style={[styles.insightBody, { color: theme.textSecondary }]}>
+                  No expense transactions recorded this month. Your budget is intact.
+                </Text>
+              </View>
             </View>
-          </View>
-        </VaultCard>
+          </VaultCard>
+        )}
 
         {/* Recent Transactions Section */}
         <View style={styles.sectionHeader}>
@@ -279,6 +328,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, isDark = tru
           )}
         </VaultCard>
       </ScrollView>
+
+      {/* First-Use Guided Tour */}
+      <GuidedTourOverlay tourKey="home" steps={HOME_TOUR_STEPS} isDark={isDark} />
     </SafeAreaView>
   );
 };

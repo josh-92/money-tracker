@@ -28,6 +28,7 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -42,6 +43,7 @@ import {
   ChevronRight,
   EyeOff,
   BellRing,
+  HelpCircle,
 } from 'lucide-react-native';
 import { spacing, layout, borderRadius } from '../theme/spacing';
 import { typography } from '../theme/typography';
@@ -50,6 +52,20 @@ import { VaultCard } from '../components/VaultCard';
 import { dbService } from '../database/DatabaseService';
 import { vaultSecurity } from '../security/VaultSecurity';
 import { VaultProfile } from '../types/database';
+import { GuidedTourOverlay, TourStep, resetAllTours } from '../components/GuidedTourOverlay';
+
+const SETTINGS_TOUR_STEPS: TourStep[] = [
+  {
+    title: 'Customizable Vault Settings',
+    description: 'Control all security settings, theme appearances, biometric authentications, and export/reset options locally.',
+    badge: 'Settings',
+  },
+  {
+    title: 'Transaction Detection Hub',
+    description: 'Configure Android notification listeners, live clipboard monitoring, and review supported Ethiopian banking SMS formats.',
+    badge: 'Detection',
+  },
+];
 
 interface SettingsScreenProps {
   navigation: any;
@@ -73,6 +89,14 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
     });
     return unsubscribe;
   }, [navigation]);
+
+  const handleReplayTours = async () => {
+    await resetAllTours();
+    Alert.alert(
+      'App Tours Reset',
+      'All tour walkthroughs have been reset. They will automatically guide you whenever you visit each of the main tabs (Home, Accounts, Statistics, Settings).'
+    );
+  };
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]}>
@@ -256,6 +280,26 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           </TouchableOpacity>
         </VaultCard>
 
+        {/* --- HELP & TUTORIALS SECTION --- */}
+        <Text style={[styles.sectionHeader, { color: theme.textSecondary }]}>Help & Guidance</Text>
+        <VaultCard isDark={isDark} style={styles.groupCard}>
+          <TouchableOpacity
+            style={styles.menuRow}
+            onPress={handleReplayTours}
+          >
+            <View style={[styles.iconCircle, { backgroundColor: '#8B5CF620' }]}>
+              <HelpCircle size={18} color="#8B5CF6" />
+            </View>
+            <View style={styles.menuTextContainer}>
+              <Text style={[styles.menuTitle, { color: theme.textPrimary }]}>Replay App Tours</Text>
+              <Text style={[styles.menuSubtitle, { color: theme.textSecondary }]}>
+                Reset and view guided walkthroughs across all main tabs
+              </Text>
+            </View>
+            <ChevronRight size={16} color={theme.textMuted} />
+          </TouchableOpacity>
+        </VaultCard>
+
         {/* --- SUPPORT SECTION --- */}
         <Text style={[styles.sectionHeader, { color: theme.textSecondary }]}>Support</Text>
         <VaultCard isDark={isDark} style={styles.groupCard}>
@@ -280,6 +324,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           </Text>
         </View>
       </ScrollView>
+
+      {/* First-Use Guided Tour */}
+      <GuidedTourOverlay tourKey="settings" steps={SETTINGS_TOUR_STEPS} isDark={isDark} />
     </SafeAreaView>
   );
 };

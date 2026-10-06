@@ -310,7 +310,6 @@ export class DatabaseService {
       isActive: true,
       displayOrder,
       openingBalance: openingBal,
-      calculatedBalance: openingBal,
     };
   }
 
@@ -363,12 +362,12 @@ export class DatabaseService {
     const db = await this.getDb();
     let query = `
       SELECT t.*, 
-             a.name as account_name, 
+             COALESCE(a.name, 'Unassigned Account') as account_name, 
              c.name as category_name, 
              c.color_hex as category_color, 
              c.icon_name as category_icon
       FROM transactions t
-      JOIN accounts a ON t.account_id = a.id
+      LEFT JOIN accounts a ON t.account_id = a.id
       LEFT JOIN categories c ON t.category_id = c.id
       WHERE t.is_deleted = 0
     `;
@@ -460,12 +459,12 @@ export class DatabaseService {
     const db = await this.getDb();
     const row = await db.getFirstAsync<any>(
       `SELECT t.*, 
-              a.name as account_name, 
+              COALESCE(a.name, 'Unassigned Account') as account_name, 
               c.name as category_name, 
               c.color_hex as category_color, 
               c.icon_name as category_icon
        FROM transactions t
-       JOIN accounts a ON t.account_id = a.id
+       LEFT JOIN accounts a ON t.account_id = a.id
        LEFT JOIN categories c ON t.category_id = c.id
        WHERE t.id = ? AND t.is_deleted = 0;`,
       [id]
@@ -631,6 +630,18 @@ export class DatabaseService {
     );
   }
 
+  /**
+   * Explicitly associates a previously unassigned candidate transaction with a user-created account.
+   */
+  public async assignAccountToTransaction(transactionId: string, accountId: string): Promise<void> {
+    const db = await this.getDb();
+    const now = new Date().toISOString();
+    await db.runAsync(
+      `UPDATE transactions SET account_id = ?, updated_at = ? WHERE id = ?;`,
+      [accountId, now, transactionId]
+    );
+  }
+
   // --- 4-Tier Duplicate & Proximity Match Detection Engine ---
 
   public async findMatchingTransaction(
@@ -707,9 +718,9 @@ export class DatabaseService {
     if (targetRef || targetTxnNum) {
       const refToSearch = targetRef || targetTxnNum!;
       const row = await db.getFirstAsync<any>(
-        `SELECT t.*, a.name as account_name
+        `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
          FROM transactions t
-         JOIN accounts a ON t.account_id = a.id
+         LEFT JOIN accounts a ON t.account_id = a.id
          WHERE (t.ref_number = ? OR t.transaction_number = ?)
            AND t.is_deleted = 0
          LIMIT 1;`,
@@ -732,7 +743,7 @@ export class DatabaseService {
     if (query.accountId && (targetRef || targetTxnNum)) {
       const refToSearch = targetRef || targetTxnNum!;
       const row = await db.getFirstAsync<any>(
-        `SELECT t.*, a.name as account_name
+        `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
          FROM transactions t
          JOIN accounts a ON t.account_id = a.id
          WHERE t.account_id = ?
@@ -760,7 +771,7 @@ export class DatabaseService {
       const dayEnd = query.timestamp.substring(0, 10) + 'T23:59:59.999Z';
 
       const row = await db.getFirstAsync<any>(
-        `SELECT t.*, a.name as account_name
+        `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
          FROM transactions t
          JOIN accounts a ON t.account_id = a.id
          WHERE t.account_id = ?
@@ -787,9 +798,9 @@ export class DatabaseService {
     // ----------------------------------------------------
     if (query.amount > 0 && query.timestamp) {
       const row = await db.getFirstAsync<any>(
-        `SELECT t.*, a.name as account_name
+        `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
          FROM transactions t
-         JOIN accounts a ON t.account_id = a.id
+         LEFT JOIN accounts a ON t.account_id = a.id
          WHERE t.amount = ?
            AND t.timestamp BETWEEN ? AND ?
            AND t.is_deleted = 0

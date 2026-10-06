@@ -18,7 +18,7 @@ import {
 } from './types';
 import { ProviderDetector } from './ProviderDetector';
 import { RegexParser } from './RegexParser';
-import type { DatabaseService } from '../database/DatabaseService';
+import { dbService, DatabaseService } from '../database/DatabaseService';
 import { Account, TransactionSource as DbTransactionSource } from '../types/database';
 
 type IngestionListener = (result: IngestionResult) => void;
@@ -40,9 +40,11 @@ export class IngestionPipeline {
   }
 
   private async getDb(): Promise<DatabaseService> {
-    if (this.dbOverride) return this.dbOverride;
-    const { dbService } = await import('../database/DatabaseService');
-    return dbService;
+    const service = this.dbOverride || dbService;
+    if (typeof service.initialize === 'function') {
+      await service.initialize();
+    }
+    return service;
   }
 
   /**
@@ -81,7 +83,9 @@ export class IngestionPipeline {
 
       // Step 2: Deterministic Regex Parsing
       const parsed = RegexParser.parse(candidate.rawText, candidate.senderHint);
+      console.log(`[PIPELINE:PARSER] parse: success=${!!parsed}, provider=${parsed?.provider || 'none'}, amount=${parsed?.amount || 0}, type=${parsed?.type || 'none'}`);
       if (!parsed) {
+        console.warn(`[PIPELINE:PARSER] Failed to parse candidate rawText: "${candidate.rawText.substring(0, 60)}..."`);
         return {
           success: false,
           isDuplicate: false,
@@ -94,15 +98,7 @@ export class IngestionPipeline {
       const db = await this.getDb();
       const accounts = await db.getAccounts();
       const matchedAccount = this.resolveAccount(accounts, parsed.provider, parsed.accountMask);
-
-      if (!matchedAccount) {
-        return {
-          success: false,
-          isDuplicate: false,
-          status: 'UNPARSED',
-          errorMessage: `No active account available to assign ${parsed.provider} transaction.`,
-        };
-      }
+      const matchedAccountId = matchedAccount ? matchedAccount.id : null;
 
       // Build Normalized Candidate Transaction
       const timestamp = parsed.timestamp || candidate.timestamp || new Date().toISOString();
@@ -127,7 +123,7 @@ export class IngestionPipeline {
         parserVersion: parsed.parserVersion,
         templateId: parsed.templateId,
         confidenceScore: parsed.confidenceScore,
-        matchedAccountId: matchedAccount.id,
+        matchedAccountId,
       };
 
       // Step 4: 4-Tier Deduplication Check
@@ -136,12 +132,13 @@ export class IngestionPipeline {
         timestamp: normalized.timestamp,
         refNumber: normalized.refNumber,
         transactionNumber: normalized.transactionNumber,
-        accountId: matchedAccount.id,
+        accountId: matchedAccountId,
         cleanMerchant: normalized.cleanMerchant,
         toleranceMinutes: 120,
       });
 
       if (matchResult.matchFound) {
+        console.log(`[PIPELINE] Duplicate detected: ${matchResult.matchReason}`);
         const dupResult: IngestionResult = {
           success: true,
           isDuplicate: true,
@@ -153,7 +150,7 @@ export class IngestionPipeline {
         return dupResult;
       }
 
-      // Step 5: Ledger Persistence as PENDING_REVIEW
+      // Step 5: Ledger Persistence as PENDING_REVIEW (unmatched accounts land as PENDING_REVIEW with accountId: null)
       const dbSource: DbTransactionSource =
         candidate.source === 'NOTIFICATION'
           ? 'NOTIFICATION'
@@ -164,7 +161,7 @@ export class IngestionPipeline {
           : 'SMS';
 
       const newTx = await db.createTransaction({
-        accountId: matchedAccount.id,
+        accountId: matchedAccountId,
         destinationAccountId: null,
         categoryId: null, // User can assign or AI can auto-categorize in Phase 4
         amount: normalized.amount,
@@ -189,6 +186,8 @@ export class IngestionPipeline {
         originalMerchantName: normalized.merchantName,
       });
 
+      console.log(`[PIPELINE] Transaction persisted to ledger as PENDING_REVIEW (id: ${newTx.id})`);
+
       const successResult: IngestionResult = {
         success: true,
         transactionId: newTx.id,
@@ -200,7 +199,7 @@ export class IngestionPipeline {
       this.notify(successResult);
       return successResult;
     } catch (err: any) {
-      console.error('Ingestion Pipeline processing error:', err);
+      console.error('[PIPELINE] Ingestion Pipeline processing error:', err);
       return {
         success: false,
         isDuplicate: false,
@@ -212,32 +211,47 @@ export class IngestionPipeline {
 
   /**
    * Batch ingestion for historical SMS import or bulk clipboard paste.
+   * If directToLedger is true, transactions are confirmed immediately upon ingestion.
    */
   public async ingestBatch(
-    messages: CandidateMessage[]
+    messages: CandidateMessage[],
+    directToLedger = false
   ): Promise<{
     total: number;
     pendingReview: number;
+    confirmed: number;
     duplicatesSkipped: number;
     unparsed: number;
     results: IngestionResult[];
   }> {
     let pendingReview = 0;
+    let confirmed = 0;
     let duplicatesSkipped = 0;
     let unparsed = 0;
     const results: IngestionResult[] = [];
+    const db = await this.getDb();
 
     for (const msg of messages) {
       const res = await this.processCandidate(msg);
       results.push(res);
-      if (res.status === 'PENDING_REVIEW') pendingReview++;
-      else if (res.status === 'DUPLICATE_SKIPPED') duplicatesSkipped++;
-      else unparsed++;
+      if (res.status === 'PENDING_REVIEW') {
+        if (directToLedger && res.transactionId) {
+          await db.confirmTransaction(res.transactionId);
+          confirmed++;
+        } else {
+          pendingReview++;
+        }
+      } else if (res.status === 'DUPLICATE_SKIPPED') {
+        duplicatesSkipped++;
+      } else {
+        unparsed++;
+      }
     }
 
     return {
       total: messages.length,
       pendingReview,
+      confirmed,
       duplicatesSkipped,
       unparsed,
       results,

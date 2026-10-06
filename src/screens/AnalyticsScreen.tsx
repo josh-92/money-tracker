@@ -24,6 +24,20 @@ import { VaultCard } from '../components/VaultCard';
 import { dbService } from '../database/DatabaseService';
 import { aiService, MonthlyAnalysisResult } from '../ai/AiService';
 import { useBalanceVisibility } from '../context/BalanceVisibilityContext';
+import { GuidedTourOverlay, TourStep } from '../components/GuidedTourOverlay';
+
+const ANALYTICS_TOUR_STEPS: TourStep[] = [
+  {
+    title: 'Statistics & Visual Analytics',
+    description: 'Explore monthly cash-flow trends, spending distribution by category, and top merchants with 100% offline arithmetic.',
+    badge: 'Insights',
+  },
+  {
+    title: 'End-of-Month AI Synthesis',
+    description: 'Generate concise, privacy-shielded summaries and practical savings suggestions grounded in your local ledger.',
+    badge: 'AI Reporting',
+  },
+];
 
 const MONTHS = ['Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar'];
 
@@ -288,6 +302,9 @@ export const AnalyticsScreen: React.FC<AnalyticsScreenProps> = ({ isDark = true 
           )}
         </VaultCard>
       </ScrollView>
+
+      {/* First-Use Guided Tour */}
+      <GuidedTourOverlay tourKey="analytics" steps={ANALYTICS_TOUR_STEPS} isDark={isDark} />
     </SafeAreaView>
   );
 };

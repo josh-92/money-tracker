@@ -134,7 +134,7 @@ export const ImportTransactionsModal: React.FC<Props> = ({
     }
   };
 
-  const handleExecuteImport = async () => {
+  const handleExecuteImport = async (directToLedger: boolean) => {
     try {
       setImporting(true);
       const candidatesToImport = previews
@@ -147,17 +147,26 @@ export const ImportTransactionsModal: React.FC<Props> = ({
       }
 
       const pipeline = IngestionPipeline.getInstance();
-      const batchResult = await pipeline.ingestBatch(candidatesToImport);
+      const batchResult = await pipeline.ingestBatch(candidatesToImport, directToLedger);
+
+      const title = directToLedger ? 'Ledger Import Complete' : 'Inbox Staging Complete';
+      const detailMessage = directToLedger
+        ? `Successfully confirmed and added ${batchResult.confirmed} transaction${batchResult.confirmed !== 1 ? 's' : ''} directly to your active ledger.\n\n${batchResult.duplicatesSkipped} duplicate${batchResult.duplicatesSkipped !== 1 ? 's' : ''} skipped.`
+        : `Successfully queued ${batchResult.pendingReview} transaction${batchResult.pendingReview !== 1 ? 's' : ''} into your Review Inbox.\n\n${batchResult.duplicatesSkipped} duplicate${batchResult.duplicatesSkipped !== 1 ? 's' : ''} skipped.`;
 
       Alert.alert(
-        'Import Complete',
-        `Successfully imported ${batchResult.pendingReview} transactions into your Review Inbox.\n\n${batchResult.duplicatesSkipped} duplicates were skipped.`,
+        title,
+        detailMessage,
         [
           {
-            text: 'Go to Inbox',
+            text: directToLedger ? 'View Transactions' : 'Go to Inbox',
             onPress: () => {
               navigation.goBack();
-              navigation.navigate('Inbox');
+              if (directToLedger) {
+                navigation.navigate('Transactions');
+              } else {
+                navigation.navigate('Inbox');
+              }
             },
           },
           {
@@ -325,25 +334,41 @@ export const ImportTransactionsModal: React.FC<Props> = ({
               </VaultCard>
             ))}
 
-            {/* Execute Import Button */}
+            {/* Dual Import Actions */}
             {validNewCount > 0 && (
-              <TouchableOpacity
-                style={[styles.executeButton, { backgroundColor: theme.primary }]}
-                onPress={handleExecuteImport}
-                disabled={importing}
-              >
-                {importing ? (
-                  <ActivityIndicator size="small" color="#FFFFFF" />
-                ) : (
-                  <>
-                    <Layers size={18} color="#FFFFFF" />
-                    <Text style={styles.executeButtonText}>
-                      Import {validNewCount} New Transaction{validNewCount > 1 ? 's' : ''} to Inbox
-                    </Text>
-                    <ArrowRight size={18} color="#FFFFFF" />
-                  </>
-                )}
-              </TouchableOpacity>
+              <View style={styles.actionButtonGroup}>
+                <TouchableOpacity
+                  style={[styles.executeButton, { backgroundColor: theme.primary }]}
+                  onPress={() => handleExecuteImport(true)}
+                  disabled={importing}
+                >
+                  {importing ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <>
+                      <CheckCircle2 size={18} color="#FFFFFF" />
+                      <Text style={styles.executeButtonText}>
+                        Add {validNewCount} Directly to Ledger (Confirmed)
+                      </Text>
+                      <ArrowRight size={18} color="#FFFFFF" />
+                    </>
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.secondaryImportButton,
+                    { backgroundColor: theme.surfaceHighlight, borderColor: theme.surfaceBorder },
+                  ]}
+                  onPress={() => handleExecuteImport(false)}
+                  disabled={importing}
+                >
+                  <Layers size={16} color={theme.textPrimary} />
+                  <Text style={[styles.secondaryImportText, { color: theme.textPrimary }]}>
+                    Queue in Inbox for Review ({validNewCount})
+                  </Text>
+                </TouchableOpacity>
+              </View>
             )}
           </View>
         )}
@@ -493,6 +518,10 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.xs,
     flex: 1,
   },
+  actionButtonGroup: {
+    marginTop: spacing.md,
+    gap: spacing.sm,
+  },
   executeButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -500,11 +529,23 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     borderRadius: borderRadius.md,
     gap: spacing.sm,
-    marginTop: spacing.md,
   },
   executeButtonText: {
     color: '#FFFFFF',
     fontSize: typography.fontSize.base,
     fontWeight: typography.fontWeight.bold,
+  },
+  secondaryImportButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.md,
+    gap: spacing.sm,
+    borderWidth: 1,
+  },
+  secondaryImportText: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
   },
 });
