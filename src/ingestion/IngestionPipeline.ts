@@ -126,6 +126,10 @@ export class IngestionPipeline {
         matchedAccountId,
       };
 
+      console.log(
+        `[PIPELINE:CANDIDATE] Candidate parsed: provider=${normalized.provider}, type=${normalized.type}, amount=${normalized.amount}, ref=${normalized.refNumber ?? 'none'}, txn=${normalized.transactionNumber ?? 'none'}, matchedAccount=${matchedAccountId ?? 'none'}`
+      );
+
       // Step 4: 4-Tier Deduplication Check
       const matchResult = await db.findMatchingTransaction({
         amount: normalized.amount,

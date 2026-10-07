@@ -25,6 +25,7 @@ import {
   DEFAULT_ACCOUNTS_SEED,
   runMigrations,
 } from './schema';
+import { RegexParser } from '../ingestion/RegexParser';
 
 export class DatabaseService {
   private db: SQLite.SQLiteDatabase | null = null;
@@ -63,6 +64,22 @@ export class DatabaseService {
           [cat.id, cat.name, cat.iconName, cat.colorHex, cat.displayOrder, 1]
         );
       }
+    }
+
+    // Clean up corrupted short/stopword references saved from earlier builds
+    try {
+      await db.runAsync(`
+        UPDATE transactions 
+        SET ref_number = NULL 
+        WHERE ref_number IS NOT NULL AND (LOWER(ref_number) = 'is' OR LENGTH(ref_number) < 4);
+      `);
+      await db.runAsync(`
+        UPDATE transactions 
+        SET transaction_number = NULL 
+        WHERE transaction_number IS NOT NULL AND (LOWER(transaction_number) = 'is' OR LENGTH(transaction_number) < 4);
+      `);
+    } catch (cleanErr) {
+      console.warn('[DB] Reference sanitation notice:', cleanErr);
     }
 
     this.isInitialized = true;
@@ -715,8 +732,15 @@ export class DatabaseService {
     const targetRef = query.refNumber?.trim();
     const targetTxnNum = query.transactionNumber?.trim();
 
-    if (targetRef || targetTxnNum) {
-      const refToSearch = targetRef || targetTxnNum!;
+    const candidateRef = RegexParser.isValidReference(targetRef) ? targetRef : undefined;
+    const candidateTxn = RegexParser.isValidReference(targetTxnNum) ? targetTxnNum : undefined;
+    const refToSearch = candidateRef || candidateTxn;
+
+    console.log(
+      `[DUPLICATE:CHECK] candidate ref=${refToSearch ?? 'none'}, amount=${query.amount}, accountId=${query.accountId ?? 'none'}, cleanMerchant=${query.cleanMerchant ?? 'none'}`
+    );
+
+    if (refToSearch) {
       const row = await db.getFirstAsync<any>(
         `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
          FROM transactions t
@@ -728,6 +752,7 @@ export class DatabaseService {
       );
 
       if (row) {
+        console.log(`[DUPLICATE:MATCH] Matched existing tx id=${row.id}, ref=${refToSearch}`);
         return {
           matchFound: true,
           transaction: mapRowToTx(row),
@@ -740,8 +765,7 @@ export class DatabaseService {
     // ----------------------------------------------------
     // Tier 2: Account + Exact Ref Match (Scoped to specific account)
     // ----------------------------------------------------
-    if (query.accountId && (targetRef || targetTxnNum)) {
-      const refToSearch = targetRef || targetTxnNum!;
+    if (query.accountId && refToSearch) {
       const row = await db.getFirstAsync<any>(
         `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
          FROM transactions t
@@ -754,6 +778,7 @@ export class DatabaseService {
       );
 
       if (row) {
+        console.log(`[DUPLICATE:MATCH] Tier 2 matched existing tx id=${row.id}, account=${row.account_name}, ref=${refToSearch}`);
         return {
           matchFound: true,
           transaction: mapRowToTx(row),
@@ -778,9 +803,11 @@ export class DatabaseService {
            AND t.amount = ?
            AND LOWER(t.clean_merchant) = LOWER(?)
            AND t.timestamp BETWEEN ? AND ?
+           AND (t.ref_number IS NULL OR ? IS NULL)
+           AND (t.transaction_number IS NULL OR ? IS NULL)
            AND t.is_deleted = 0
          LIMIT 1;`,
-        [query.accountId, query.amount, query.cleanMerchant.trim(), dayStart, dayEnd]
+        [query.accountId, query.amount, query.cleanMerchant.trim(), dayStart, dayEnd, refToSearch ?? null, refToSearch ?? null]
       );
 
       if (row) {
@@ -803,10 +830,12 @@ export class DatabaseService {
          LEFT JOIN accounts a ON t.account_id = a.id
          WHERE t.amount = ?
            AND t.timestamp BETWEEN ? AND ?
+           AND (t.ref_number IS NULL OR ? IS NULL)
+           AND (t.transaction_number IS NULL OR ? IS NULL)
            AND t.is_deleted = 0
          ORDER BY ABS(strftime('%s', t.timestamp) - strftime('%s', ?)) ASC
          LIMIT 1;`,
-        [query.amount, minTime, maxTime, query.timestamp]
+        [query.amount, minTime, maxTime, refToSearch ?? null, refToSearch ?? null, query.timestamp]
       );
 
       if (row) {
@@ -865,7 +894,7 @@ export class DatabaseService {
           SELECT SUM(amount) 
           FROM transactions 
           WHERE category_id = c.id 
-            AND type = 'EXPENSE' 
+            AND (type = 'EXPENSE' OR (type = 'TRANSFER' AND destination_account_id IS NULL))
             AND is_deleted = 0 
             AND status = 'CONFIRMED'
             AND timestamp >= ? AND timestamp < ?
@@ -916,7 +945,7 @@ export class DatabaseService {
     const totals = await db.getFirstAsync<{ income: number; expense: number }>(
       `SELECT 
         COALESCE(SUM(CASE WHEN type = 'INCOME' THEN amount ELSE 0 END), 0) as income,
-        COALESCE(SUM(CASE WHEN type = 'EXPENSE' THEN amount ELSE 0 END), 0) as expense
+        COALESCE(SUM(CASE WHEN (type = 'EXPENSE' OR (type = 'TRANSFER' AND destination_account_id IS NULL)) THEN amount ELSE 0 END), 0) as expense
        FROM transactions
        WHERE is_deleted = 0 
          AND status = 'CONFIRMED'
@@ -933,7 +962,7 @@ export class DatabaseService {
       `SELECT c.name, c.color_hex, SUM(t.amount) as amount
        FROM transactions t
        JOIN categories c ON t.category_id = c.id
-       WHERE t.type = 'EXPENSE' 
+       WHERE (t.type = 'EXPENSE' OR (t.type = 'TRANSFER' AND t.destination_account_id IS NULL))
          AND t.is_deleted = 0 
          AND t.status = 'CONFIRMED'
          AND t.timestamp >= ? AND t.timestamp < ?
@@ -954,7 +983,7 @@ export class DatabaseService {
     const merchantRows = await db.getAllAsync<{ merchant: string; amount: number; count: number }>(
       `SELECT COALESCE(clean_merchant, merchant_name) as merchant, SUM(amount) as amount, COUNT(*) as count
        FROM transactions
-       WHERE type = 'EXPENSE' 
+       WHERE (type = 'EXPENSE' OR (type = 'TRANSFER' AND destination_account_id IS NULL))
          AND is_deleted = 0 
          AND status = 'CONFIRMED'
          AND timestamp >= ? AND timestamp < ?

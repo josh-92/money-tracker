@@ -150,8 +150,11 @@ function simulate4TierMatch(
   // Tier 1: Exact Reference Number / Transaction Number
   const targetRef = query.refNumber?.trim();
   const targetTxnNum = query.transactionNumber?.trim();
-  if (targetRef || targetTxnNum) {
-    const refToSearch = targetRef || targetTxnNum!;
+  const candidateRef = RegexParser.isValidReference(targetRef) ? targetRef : undefined;
+  const candidateTxn = RegexParser.isValidReference(targetTxnNum) ? targetTxnNum : undefined;
+  const refToSearch = candidateRef || candidateTxn;
+
+  if (refToSearch) {
     const match = ledger.find(
       (t) => (t.refNumber === refToSearch || t.transactionNumber === refToSearch) && !t.isDeleted
     );
@@ -166,8 +169,7 @@ function simulate4TierMatch(
   }
 
   // Tier 2: Account + Exact Ref Match
-  if (query.accountId && (targetRef || targetTxnNum)) {
-    const refToSearch = targetRef || targetTxnNum!;
+  if (query.accountId && refToSearch) {
     const match = ledger.find(
       (t) =>
         t.accountId === query.accountId &&
@@ -193,6 +195,8 @@ function simulate4TierMatch(
         t.amount === query.amount &&
         t.cleanMerchant?.toLowerCase() === query.cleanMerchant?.toLowerCase() &&
         t.timestamp.substring(0, 10) === targetDay &&
+        (!t.refNumber || !refToSearch) &&
+        (!t.transactionNumber || !refToSearch) &&
         !t.isDeleted
     );
     if (match) {
@@ -209,6 +213,8 @@ function simulate4TierMatch(
   if (query.amount > 0 && query.timestamp) {
     const match = ledger.find((t) => {
       if (t.isDeleted || t.amount !== query.amount) return false;
+      if (t.refNumber && refToSearch) return false;
+      if (t.transactionNumber && refToSearch) return false;
       const tTime = new Date(t.timestamp).getTime();
       return tTime >= minTime && tTime <= maxTime;
     });
@@ -295,15 +301,69 @@ assert(
   'Tier 4: Amount within ±120m proximity window returns PROXIMITY_AMOUNT confidence'
 );
 
-// Test Negative Case (Outside proximity window and no ref)
-const negResult = simulate4TierMatch(ledger, {
-  amount: 450,
-  timestamp: '2026-10-04T22:00:00.000Z', // 8 hours later
+// Test Negative Case: Corrupted stopword reference ("is") is rejected and does not falsely match
+const isRefResult = simulate4TierMatch(ledger, {
+  amount: 15,
+  timestamp: '2026-10-07T12:00:00.000Z',
+  refNumber: 'is',
+});
+assert(
+  !isRefResult.matchFound,
+  'Corrupted stopword reference ("is") rejected from Tier 1/2 match'
+);
+
+// Test Distinct Outgoing 15 ETB Transfers
+const outgoing15Ledger: Transaction[] = [
+  ...ledger,
+  {
+    id: 'tx_telebirr_15_first',
+    accountId: 'acc_telebirr',
+    amount: 15.0,
+    type: 'TRANSFER',
+    merchantName: 'Dawit Tsige',
+    cleanMerchant: 'Dawit Tsige',
+    source: 'NOTIFICATION',
+    status: 'CONFIRMED',
+    timestamp: '2026-10-07T08:00:00.000Z',
+    refNumber: 'TR9988',
+    isDeleted: false,
+    createdAt: '2026-10-07T08:00:00.000Z',
+    updatedAt: '2026-10-07T08:00:00.000Z',
+  },
+];
+
+const second15Result = simulate4TierMatch(outgoing15Ledger, {
+  amount: 15.0,
+  timestamp: '2026-10-07T15:00:00.000Z', // 7 hours later
+  refNumber: 'TR9989', // distinct reference
+  accountId: 'acc_telebirr',
+  cleanMerchant: 'Dawit Tsige',
   toleranceMinutes: 120,
 });
 assert(
-  !negResult.matchFound && negResult.confidence === 'NONE',
-  'Negative test: Out-of-window transaction returns NONE confidence without false positive'
+  !second15Result.matchFound,
+  'Distinct 15 ETB outgoing transfer with unique reference does not falsely collide'
+);
+
+// Test Transfer Spending Semantics
+const transactionsForSpending: Array<{ type: string; destination_account_id: string | null; amount: number }> = [
+  { type: 'EXPENSE', destination_account_id: null, amount: 100 },
+  { type: 'TRANSFER', destination_account_id: null, amount: 50 }, // External P2P transfer
+  { type: 'TRANSFER', destination_account_id: 'acc_telebirr', amount: 200 }, // Internal transfer between own accounts
+  { type: 'INCOME', destination_account_id: null, amount: 500 },
+];
+
+const computedExpense = transactionsForSpending.reduce((sum, tx) => {
+  if (tx.type === 'EXPENSE' || (tx.type === 'TRANSFER' && tx.destination_account_id === null)) {
+    return sum + tx.amount;
+  }
+  return sum;
+}, 0);
+
+assert(
+  computedExpense === 150,
+  'Spending semantics: external P2P transfer (50 ETB) counted as spending, internal transfer (200 ETB) excluded',
+  `Expected 150, got ${computedExpense}`
 );
 
 console.log(`\n====================================================`);

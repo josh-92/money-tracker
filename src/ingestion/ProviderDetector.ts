@@ -72,11 +72,11 @@ export class ProviderDetector {
     let provider: ProviderKey | 'UNKNOWN' = 'UNKNOWN';
 
     // Check Package Name first (Android notifications from official apps)
-    if (pkg.includes('tydic.ethiopay') || pkg.includes('telebirr')) {
+    if (pkg.includes('tydic.ethiopay') || pkg.includes('telebirr') || pkg.includes('ethiomobilemoney')) {
       provider = 'TELEBIRR';
-    } else if (pkg.includes('combanketh') || pkg.includes('cbebirr')) {
+    } else if (pkg.includes('combanketh') || pkg.includes('cbebirr') || pkg.includes('cbe')) {
       provider = 'CBE';
-    } else if (pkg.includes('awash')) {
+    } else if (pkg.includes('awash') || pkg.includes('awashpay')) {
       provider = 'AWASH';
     }
 
@@ -116,7 +116,7 @@ export class ProviderDetector {
       if (
         /\b(?:telebirr|127|cn\.tydic\.ethiopay)\b/i.test(raw) ||
         /ቴሌብር|የቴሌብር/i.test(raw) ||
-        /(?:Transaction\s+number|Txn\s+(?:number|ID|No)|Transaction\s+ID)[:\s]*(?:CR|TR|RC|AT|CO|CI)[A-Z0-9]+/i.test(raw) ||
+        /(?:Transaction\s+number|Txn\s+(?:number|ID|No)|Transaction\s+ID)(?:\s+is)?[:\s]*(?:CR|TR|RC|AT|CO|CI)[A-Z0-9]+/i.test(raw) ||
         /የግብይት\s*ቁጥር[:\s]*(?:CR|TR|RC|AT|CO|CI)[A-Z0-9]+/i.test(raw) ||
         /(?:transferred|sent)\s+ETB\s+[\d,]+/i.test(raw) ||
         /(?:ወደ|ለ)\s+.+?\s+የ\s*[\d,]+\s*ብር\s*አስተላልፈዋል/i.test(raw) ||
@@ -125,17 +125,24 @@ export class ProviderDetector {
         provider = 'TELEBIRR';
       } else if (
         /\b(?:CBE|Commercial Bank of Ethiopia|CBEBirr)\b/i.test(raw) ||
-        /(?:Ref|Txn)[:\s]+FT\d{4,}/i.test(raw) ||
+        /(?:Ref|Txn|Reference)(?:\s+is)?[:\s]+FT\d{4,}/i.test(raw) ||
+        /\bFT\d{5,}\b/i.test(raw) ||
         /ውድ\s*ደንበኛችን|የሂሳብ\s*ቁጥር\s*[*xX\d]+.*(?:ወጪ|ገቢ)\s*ተደርጓል/i.test(raw)
       ) {
         provider = 'CBE';
       } else if (
         /\b(?:Awash Bank|Awash|AwashBirr|8900)\b/i.test(raw) ||
-        /(?:Reference|Ref)[:\s]+AW\d+/i.test(raw) ||
+        /(?:Reference|Ref|Txn ID|Txn)(?:\s+is)?[:\s]+AW\d+/i.test(raw) ||
+        /\bAW\d{4,}\b/i.test(raw) ||
+        /payment\s+of\s+[\d,]+(?:\.\d{1,2})?\s*ETB\s+charge/i.test(raw) ||
         /አዋሽ\s*ባንክ|አዋሽ/i.test(raw) ||
         /(?:account|Acc\.?)\s*[*xX\d]+\s+(?:has\s+been|is|was)?\s*(?:debited|credited)/i.test(raw)
       ) {
         provider = 'AWASH';
+      } else if (/transferred\s+to\s+other\s+bank/i.test(raw)) {
+        if (/FT\d+/i.test(raw)) provider = 'CBE';
+        else if (/AW\d+|Awash/i.test(raw)) provider = 'AWASH';
+        else provider = 'CBE';
       }
     }
 
@@ -155,10 +162,10 @@ export class ProviderDetector {
     let templateId = `${provider.toLowerCase()}_unknown`;
 
     if (language === 'EN') {
-      if (/transferred\s+ETB|transfer\s+to|sent\s+ETB/i.test(raw)) {
+      if (/transferred\s+ETB|transfer\s+to|sent\s+ETB|transferred\s+to\s+other\s+bank/i.test(raw)) {
         templateCategory = 'TRANSFER';
         templateId = `${provider.toLowerCase()}_transfer_en`;
-      } else if (/paid\s+ETB|debited\s+(?:with|by)\s+ETB|bought\s+ETB.*airtime|withdrawn/i.test(raw)) {
+      } else if (/paid\s+ETB|debited\s+(?:with|by)\s+ETB|bought\s+ETB.*airtime|withdrawn|payment\s+of/i.test(raw)) {
         if (/airtime/i.test(raw)) {
           templateCategory = 'AIRTIME';
           templateId = `${provider.toLowerCase()}_airtime_en`;

@@ -47,12 +47,13 @@ export class RegexParser {
     // 1. Awash Check (by hint or explicit Awash marker / shortcode / ref)
     if (
       hint.includes('AWASH') ||
+      hint.includes('AWASHPAY') ||
       hint === '8900' ||
       hint.includes('8900') ||
       hint.includes('አዋሽ') ||
       /\b(?:AW\d+|Awash|AwashBirr|8900|አዋሽ)\b/i.test(text)
     ) {
-      const awash = this.parseAwash(text);
+      const awash = this.parseAwash(text, senderHint);
       if (awash) return awash;
     }
 
@@ -72,14 +73,14 @@ export class RegexParser {
       hint.includes('CBE') ||
       hint.includes('COMMERCIAL') ||
       hint === '951' ||
-      /\b(?:CBE|CBEBirr|951)\b/i.test(text)
+      /\b(?:CBE|CBEBirr|951|FT\d+)\b/i.test(text)
     ) {
       const cbe = this.parseCBE(text);
       if (cbe) return cbe;
     }
 
     // 4. Fallback: Try all in order
-    return this.parseTelebirr(text) || this.parseCBE(text) || this.parseAwash(text);
+    return this.parseTelebirr(text) || this.parseCBE(text) || this.parseAwash(text, senderHint);
   }
 
   // =========================================================================
@@ -96,7 +97,7 @@ export class RegexParser {
     if (mTbAirtime) {
       const amount = this.parseAmount(mTbAirtime[1]);
       const phone = mTbAirtime[2];
-      const ref = this.extractRegex(text, /(?:Txn number|Transaction number|Txn ID)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Txn number|Transaction number|Txn ID|Txn No|Ref)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
       const balance = this.extractBalance(text);
 
       return {
@@ -123,13 +124,13 @@ export class RegexParser {
     // "You have paid ETB 350.00 to Kaldi's Coffee (251911223344) on 2026-10-04 14:30:00. Transaction number: CR12345. Your current balance is ETB 2750.00."
     // Also matches push notification without inline date: "You have paid ETB 250.00 to Kaldis Coffee. Transaction number: CR998877. Your balance is ETB 1450.00."
     // -------------------------------------------------------------
-    const tbPay = /paid\s+ETB\s+([\d,]+(?:\.\d{1,2})?)\s+to\s+(.+?)(?:\s+\([0-9+]+\))?(?:\s+on\s+([\d\-:\s\/]+))?\.\s*(?:Transaction number|Txn ID|Txn number)[:\s]+([A-Z0-9]+)/i;
+    const tbPay = /paid\s+ETB\s+([\d,]+(?:\.\d{1,2})?)\s+to\s+(.+?)(?:\s+\([0-9+]+\))?(?:\s+on\s+([\d\-:\s\/]+))?\.\s*(?:Transaction number|Txn ID|Txn number)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i;
     const mTbPay = text.match(tbPay);
     if (mTbPay) {
       const amount = this.parseAmount(mTbPay[1]);
       const merchant = mTbPay[2].trim();
       const dateStr = mTbPay[3]?.trim();
-      const ref = mTbPay[4].trim();
+      const ref = this.isValidReference(mTbPay[4]) ? mTbPay[4].trim() : undefined;
       const balance = this.extractBalance(text);
 
       return {
@@ -163,7 +164,7 @@ export class RegexParser {
     if (mTbTransfer) {
       const amount = this.parseAmount(mTbTransfer[1]);
       let recipient = mTbTransfer[2].replace(/\s+successfully\b/i, '').trim();
-      const ref = this.extractRegex(text, /(?:Txn number|Transaction number|Txn ID|Txn No|Ref)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Txn number|Transaction number|Txn ID|Txn No|Ref)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
       const balance = this.extractBalance(text);
 
       return {
@@ -195,7 +196,7 @@ export class RegexParser {
     if (mTbReceive) {
       const amount = this.parseAmount(mTbReceive[1]);
       const sender = mTbReceive[2].replace(/\s+\([0-9+]+\)/, '').trim();
-      const ref = this.extractRegex(text, /(?:Txn number|Transaction number|Txn ID|Txn No|Ref)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Txn number|Transaction number|Txn ID|Txn No|Ref)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
       const balance = this.extractBalance(text);
 
       return {
@@ -226,7 +227,7 @@ export class RegexParser {
     if (mTbDeposit) {
       const amount = this.parseAmount(mTbDeposit[1]);
       const sourceDesc = mTbDeposit[2].trim();
-      const ref = this.extractRegex(text, /(?:Txn number|Transaction number|Txn ID)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Txn number|Transaction number|Txn ID|Txn No|Ref)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
       const balance = this.extractBalance(text);
 
       return {
@@ -256,7 +257,7 @@ export class RegexParser {
     if (mTbAmAirtime) {
       const amount = this.parseAmount(mTbAmAirtime[1]);
       const phone = mTbAmAirtime[2];
-      const ref = this.extractRegex(text, /የግብይት\s*ቁጥር[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:የግብይት\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]{4,})/i);
       const balance = this.extractBalance(text);
 
       return {
@@ -287,7 +288,7 @@ export class RegexParser {
     if (mTbAmPay) {
       const merchant = mTbAmPay[1].trim();
       const amount = this.parseAmount(mTbAmPay[2]);
-      const ref = this.extractRegex(text, /የግብይት\s*ቁጥር[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:የግብይት\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]{4,})/i);
       const balance = this.extractBalance(text);
 
       return {
@@ -318,7 +319,7 @@ export class RegexParser {
     if (mTbAmTransfer) {
       const recipient = (mTbAmTransfer[1] || mTbAmTransfer[4] || 'Telebirr Recipient').trim();
       const amount = this.parseAmount(mTbAmTransfer[2] || mTbAmTransfer[3]);
-      const ref = this.extractRegex(text, /የግብይት\s*ቁጥር[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:የግብይት\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]{4,})/i);
       const balance = this.extractBalance(text);
 
       return {
@@ -349,7 +350,7 @@ export class RegexParser {
     if (mTbAmReceive) {
       const sender = mTbAmReceive[1].trim();
       const amount = this.parseAmount(mTbAmReceive[2]);
-      const ref = this.extractRegex(text, /የግብይት\s*ቁጥር[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:የግብይት\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]{4,})/i);
       const balance = this.extractBalance(text);
 
       return {
@@ -392,7 +393,7 @@ export class RegexParser {
       const dateStr = mCbeDebit[3]?.trim();
       const merchant = mCbeDebit[4].trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:Ref|Txn|Reference)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Ref|Txn|Reference)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'CBE',
@@ -426,7 +427,7 @@ export class RegexParser {
       const fromMask = this.normalizeAccountMask(mCbeTransfer[2]);
       const recipient = (mCbeTransfer[4] || mCbeTransfer[3] || 'Transfer Recipient').trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:Ref|Txn|Reference)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Ref|Txn|Reference)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'CBE',
@@ -460,7 +461,7 @@ export class RegexParser {
       const dateStr = mCbeCredit[3]?.trim();
       const sender = mCbeCredit[4].trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:Ref|Txn|Reference)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Ref|Txn|Reference)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'CBE',
@@ -494,7 +495,7 @@ export class RegexParser {
       const amount = this.parseAmount(mCbeAmDebit[2] || mCbeAmDebit[3]);
       const merchant = (mCbeAmDebit[4] || mCbeAmDebit[5] || 'CBE Debit').trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:የማጣቀሻ\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:የማጣቀሻ\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'CBE',
@@ -527,7 +528,7 @@ export class RegexParser {
       const amount = this.parseAmount(mCbeAmCredit[2]);
       const sender = (mCbeAmCredit[3] || mCbeAmCredit[4] || 'CBE Credit').trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:የማጣቀሻ\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:የማጣቀሻ\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'CBE',
@@ -560,7 +561,7 @@ export class RegexParser {
       const recipient = (mCbeAmTransfer[3] || mCbeAmTransfer[2] || 'Transfer Recipient').trim();
       const amount = this.parseAmount(mCbeAmTransfer[4]);
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:የማጣቀሻ\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:የማጣቀሻ\s*ቁጥር|መለያ\s*ቁጥር)[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'CBE',
@@ -582,6 +583,40 @@ export class RegexParser {
       };
     }
 
+    // -------------------------------------------------------------
+    // Pattern CBE-7: Other-Bank Transfer (English)
+    // "Dear Customer , You have transferred to other bank ETB 20 to Abebe on 07/10/2026. Ref: FT123456. Balance: ETB 500."
+    // "Dear Customer, you have transferred to other bank ETB 20.00 to Abebe. Ref: FT123456. Balance: ETB 500.00."
+    // -------------------------------------------------------------
+    const cbeOtherBank = /(?:Dear Customer\s*,\s+)?(?:You have\s+)?transferred\s+to\s+other\s+bank\s+(?:ETB\s+)?([\d,]+(?:\.\d{1,2})?)\s*(?:ETB)?(?:\s+to\s+(.+?))?(?:\s+on\s+([\d\/\-:\s]+))?(?:\.|\s+(?:Balance|Ref|Reference|Current|Your|$))/i;
+    const mCbeOtherBank = text.match(cbeOtherBank);
+    if (mCbeOtherBank) {
+      const amount = this.parseAmount(mCbeOtherBank[1]);
+      const recipient = (mCbeOtherBank[2] || 'Other Bank Transfer').trim();
+      const dateStr = mCbeOtherBank[3]?.trim();
+      const balance = this.extractBalance(text);
+      const ref = this.extractRegex(text, /(?:Ref|Txn|Reference)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
+
+      return {
+        provider: 'CBE',
+        type: 'TRANSFER',
+        amount,
+        currency: 'ETB',
+        merchantName: recipient,
+        cleanMerchant: recipient,
+        recipient,
+        balanceAfterTransaction: balance,
+        balance,
+        refNumber: ref,
+        transactionNumber: ref,
+        timestamp: this.normalizeDate(dateStr),
+        rawSourceMessage: text,
+        confidenceScore: 0.98,
+        templateId: 'cbe_other_bank_transfer_en',
+        parserVersion: this.PARSER_VERSION,
+      };
+    }
+
     return null;
   }
 
@@ -589,7 +624,13 @@ export class RegexParser {
   // AWASH BANK PARSER (English & Amharic)
   // =========================================================================
 
-  public static parseAwash(text: string): ParsedBankNotification | null {
+  public static parseAwash(text: string, senderHint?: string): ParsedBankNotification | null {
+    const isAwashContext =
+      text.toLowerCase().includes('awash') ||
+      text.includes('8900') ||
+      /AW\d+/i.test(text) ||
+      (senderHint && senderHint.toUpperCase().includes('AWASH'));
+
     // -------------------------------------------------------------
     // Pattern AW-1: Debit Alert (English)
     // "Your account ***3901 has been debited by ETB 800.00 at Total Bole on 04/10/2026. Available Balance: ETB 1,300.00. Reference: AW9876."
@@ -604,7 +645,7 @@ export class RegexParser {
       const amount = this.parseAmount(mAwashDebit[2]);
       const merchant = (mAwashDebit[3] || 'Awash Debit').trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:Reference|Ref)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Reference|Ref|Txn)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'AWASH',
@@ -640,7 +681,7 @@ export class RegexParser {
       const amount = this.parseAmount(mAwashCredit[2]);
       const sender = (mAwashCredit[3] || 'Awash Credit').trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:Reference|Ref)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Reference|Ref|Txn)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'AWASH',
@@ -673,7 +714,7 @@ export class RegexParser {
       const amount = this.parseAmount(mAwashTransfer[2]);
       const recipient = mAwashTransfer[3].trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:Reference|Ref)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Reference|Ref|Txn)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'AWASH',
@@ -707,7 +748,7 @@ export class RegexParser {
       const amount = this.parseAmount(mAwashAmDebit[2]);
       const merchant = (mAwashAmDebit[3] || mAwashAmDebit[4] || 'Awash Debit').trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:መለያ\s*ቁጥር|የማጣቀሻ\s*ቁጥር)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:መለያ\s*ቁጥር|የማጣቀሻ\s*ቁጥር)[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'AWASH',
@@ -741,7 +782,7 @@ export class RegexParser {
       const amount = this.parseAmount(mAwashAmCredit[2]);
       const sender = (mAwashAmCredit[3] || mAwashAmCredit[4] || 'Awash Credit').trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:መለያ\s*ቁጥር|የማጣቀሻ\s*ቁጥር)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:መለያ\s*ቁጥር|የማጣቀሻ\s*ቁጥር)[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'AWASH',
@@ -769,11 +810,11 @@ export class RegexParser {
     // -------------------------------------------------------------
     const awashBirrReceive = /(?:You have received|Received)\s+ETB\s+([\d,]+(?:\.\d{1,2})?)\s+from\s+(.+?)(?:\s+\([0-9+]+\))?(?:\s+on\s+[\d\/\-:\s]+)?(?:\.|\s+(?:Txn|Ref|Available|Balance|Your|$))/i;
     const mAwashBirrRec = text.match(awashBirrReceive);
-    if (mAwashBirrRec && (text.toLowerCase().includes('awash') || text.includes('8900') || /AW\d+/i.test(text))) {
+    if (mAwashBirrRec && isAwashContext) {
       const amount = this.parseAmount(mAwashBirrRec[1]);
       const sender = mAwashBirrRec[2].trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:Reference|Ref|Txn ID|Txn)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Reference|Ref|Txn ID|Txn)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'AWASH',
@@ -800,11 +841,11 @@ export class RegexParser {
     // -------------------------------------------------------------
     const awashBirrSend = /(?:You have transferred|Transferred|You have paid|Paid)\s+ETB\s+([\d,]+(?:\.\d{1,2})?)\s+to\s+(.+?)(?:\s+\([0-9+]+\))?(?:\s+on\s+[\d\/\-:\s]+)?(?:\.|\s+(?:Txn|Ref|Available|Balance|Your|$))/i;
     const mAwashBirrSend = text.match(awashBirrSend);
-    if (mAwashBirrSend && (text.toLowerCase().includes('awash') || text.includes('8900') || /AW\d+/i.test(text))) {
+    if (mAwashBirrSend && isAwashContext) {
       const amount = this.parseAmount(mAwashBirrSend[1]);
       const recipient = mAwashBirrSend[2].trim();
       const balance = this.extractBalance(text);
-      const ref = this.extractRegex(text, /(?:Reference|Ref|Txn ID|Txn)[:\s]+([A-Z0-9]+)/i);
+      const ref = this.extractRegex(text, /(?:Reference|Ref|Txn ID|Txn)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
       return {
         provider: 'AWASH',
@@ -821,6 +862,74 @@ export class RegexParser {
         rawSourceMessage: text,
         confidenceScore: 0.95,
         templateId: 'awash_birr_send_en',
+        parserVersion: this.PARSER_VERSION,
+      };
+    }
+
+    // -------------------------------------------------------------
+    // Pattern AW-8: AwashBirr Pro Merchant / Bill Payment (English)
+    // "Dear Customer, School fees payment of 1,200.00 ETB charge- 0.00 ETB on 2026-10-07 09:12. Ref: AW123456. Your balance is 5,400.00 ETB."
+    // "School fees payment of 1,200.00 ETB charge- 0 on 2026-10-07. Ref: AW123456. Balance: 5,400.00 ETB."
+    // -------------------------------------------------------------
+    const awashProPay = /(?:Dear Customer\s*,\s+)?(.+?)\s+payment\s+of\s+([\d,]+(?:\.\d{1,2})?)\s*ETB(?:\s+charge[-\s:]+([\d,]+(?:\.\d{1,2})?)\s*(?:ETB)?)?(?:\s+on\s+([\d\-:\s\/]+))?(?:\.|\s+(?:Ref|Reference|Txn|Your|Current|Balance|$))/i;
+    const mAwashProPay = text.match(awashProPay);
+    if (mAwashProPay) {
+      const merchant = mAwashProPay[1].trim();
+      const amount = this.parseAmount(mAwashProPay[2]);
+      const dateStr = mAwashProPay[4]?.trim();
+      const balance = this.extractBalance(text);
+      const ref = this.extractRegex(text, /(?:Reference|Ref|Txn ID|Txn)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
+
+      return {
+        provider: 'AWASH',
+        type: 'EXPENSE',
+        amount,
+        currency: 'ETB',
+        merchantName: merchant,
+        cleanMerchant: this.normalizeMerchant(merchant),
+        recipient: merchant,
+        balanceAfterTransaction: balance,
+        balance,
+        refNumber: ref,
+        transactionNumber: ref,
+        timestamp: this.normalizeDate(dateStr),
+        rawSourceMessage: text,
+        confidenceScore: 0.98,
+        templateId: 'awash_pro_pay_en',
+        parserVersion: this.PARSER_VERSION,
+      };
+    }
+
+    // -------------------------------------------------------------
+    // Pattern AW-9: Awash Other-Bank Transfer (English)
+    // "Awash Bank: Dear Customer , You have transferred to other bank ETB 100.00 to Abebe Bikila on 2026-10-07 10:00:00. Balance: ETB 1,500.00. Ref: AW5566."
+    // "Dear Customer , You have transferred to other bank ETB 100.00 to Abebe Bikila. Ref: AW5566."
+    // -------------------------------------------------------------
+    const awashOtherBank = /(?:Awash Bank:\s+)?(?:Dear Customer\s*,\s+)?(?:You have\s+)?transferred\s+to\s+other\s+bank\s+(?:ETB\s+)?([\d,]+(?:\.\d{1,2})?)\s*(?:ETB)?(?:\s+to\s+(.+?))?(?:\s+on\s+([\d\/\-:\s]+))?(?:\.|\s+(?:Balance|Ref|Reference|Available|Current|Your|$))/i;
+    const mAwashOtherBank = text.match(awashOtherBank);
+    if (mAwashOtherBank && isAwashContext) {
+      const amount = this.parseAmount(mAwashOtherBank[1]);
+      const recipient = (mAwashOtherBank[2] || 'Other Bank Transfer').trim();
+      const dateStr = mAwashOtherBank[3]?.trim();
+      const balance = this.extractBalance(text);
+      const ref = this.extractRegex(text, /(?:Reference|Ref|Txn ID|Txn)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
+
+      return {
+        provider: 'AWASH',
+        type: 'TRANSFER',
+        amount,
+        currency: 'ETB',
+        merchantName: recipient,
+        cleanMerchant: recipient,
+        recipient,
+        balanceAfterTransaction: balance,
+        balance,
+        refNumber: ref,
+        transactionNumber: ref,
+        timestamp: this.normalizeDate(dateStr),
+        rawSourceMessage: text,
+        confidenceScore: 0.98,
+        templateId: 'awash_other_bank_transfer_en',
         parserVersion: this.PARSER_VERSION,
       };
     }
@@ -847,9 +956,24 @@ export class RegexParser {
     return undefined;
   }
 
+  public static isValidReference(ref: string | null | undefined): boolean {
+    if (!ref) return false;
+    const trimmed = ref.trim();
+    if (trimmed.length < 4) return false;
+    const upper = trimmed.toUpperCase();
+    const stopWords = new Set([
+      'IS', 'ON', 'TO', 'AT', 'BY', 'FOR', 'THE', 'OF', 'WITH', 'FROM',
+      'ETB', 'BIRR', 'REF', 'TXN', 'TRANSACTION', 'NUMBER', 'TRUE', 'FALSE', 'NULL', 'UNDEFINED'
+    ]);
+    if (stopWords.has(upper)) return false;
+    return /^[A-Z0-9_-]+$/i.test(trimmed);
+  }
+
   private static extractRegex(text: string, regex: RegExp): string | undefined {
     const m = text.match(regex);
-    return m ? m[1].trim() : undefined;
+    if (!m) return undefined;
+    const val = m[1].trim();
+    return this.isValidReference(val) ? val : undefined;
   }
 
   private static normalizeAccountMask(mask: string): string {

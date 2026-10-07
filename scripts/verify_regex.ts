@@ -103,6 +103,27 @@ const testCases = [
     text: 'የሂሳብ ቁጥር ***3901 የ 5,000.00 ብር ገቢ ተደርጓል (ከ Payroll)። ቀሪ ሂሳብ: 6,300.00 ብር። መለያ ቁጥር: AW5432',
     expected: { provider: 'AWASH', type: 'INCOME', amount: 5000, merchant: 'Payroll', balance: 6300, ref: 'AW5432' },
   },
+  {
+    name: 'Telebirr Outgoing Transfer (With "is" in reference string)',
+    text: 'You have transferred ETB 15.00 to Dawit Tsige on 2026-10-07. Txn number is TR9988. Current balance is ETB 1500.00.',
+    expected: { provider: 'TELEBIRR', type: 'TRANSFER', amount: 15, merchant: 'Dawit Tsige', balance: 1500, ref: 'TR9988' },
+  },
+  {
+    name: 'AwashBirr Pro School Fees Payment',
+    text: 'Dear Customer, School fees payment of 1,200.00 ETB charge- 0.00 ETB on 2026-10-07 09:12. Ref: AW123456. Your balance is 5,400.00 ETB.',
+    senderHint: 'com.sc.awashpay',
+    expected: { provider: 'AWASH', type: 'EXPENSE', amount: 1200, merchant: 'School fees', balance: 5400, ref: 'AW123456' },
+  },
+  {
+    name: 'Awash Bank Other-Bank Transfer',
+    text: 'Awash Bank: Dear Customer , You have transferred to other bank ETB 100.00 to Abebe Bikila on 2026-10-07 10:00:00. Balance: ETB 1,500.00. Ref: AW5566.',
+    expected: { provider: 'AWASH', type: 'TRANSFER', amount: 100, merchant: 'Abebe Bikila', balance: 1500, ref: 'AW5566' },
+  },
+  {
+    name: 'CBE Other-Bank Transfer',
+    text: 'Dear Customer , You have transferred to other bank ETB 20 to Abebe on 07/10/2026. Ref: FT123456. Balance: ETB 500.',
+    expected: { provider: 'CBE', type: 'TRANSFER', amount: 20, merchant: 'Abebe', balance: 500, ref: 'FT123456' },
+  },
 ];
 
 console.log('--- RUNNING ETHIOPIAN BANK REGEX VERIFICATION ---');
@@ -119,16 +140,44 @@ for (const tc of testCases) {
   const typeOk = result.type === tc.expected.type;
   const providerOk = result.provider === tc.expected.provider;
   const merchantOk = result.cleanMerchant?.toLowerCase().includes(tc.expected.merchant.toLowerCase());
+  const refOk = (tc.expected as any).ref ? result.refNumber === (tc.expected as any).ref : true;
 
-  if (amountOk && typeOk && providerOk && merchantOk) {
-    console.log(`✅ PASSED: ${tc.name} -> ${result.provider} ${result.type} ${result.amount} ETB (${result.cleanMerchant})`);
+  if (amountOk && typeOk && providerOk && merchantOk && refOk) {
+    console.log(`✅ PASSED: ${tc.name} -> ${result.provider} ${result.type} ${result.amount} ETB (${result.cleanMerchant}) [Ref: ${result.refNumber}]`);
     passed++;
   } else {
     console.error(`❌ MISMATCH in ${tc.name}:`, { expected: tc.expected, got: result });
   }
 }
 
-console.log(`\nResults: ${passed} of ${testCases.length} tests passed.\n`);
-if (passed !== testCases.length) {
+// Reference validation tests
+console.log('\n--- VERIFYING REFERENCE VALIDATOR ---');
+const refChecks = [
+  { ref: 'is', expected: false },
+  { ref: 'IS', expected: false },
+  { ref: 'to', expected: false },
+  { ref: 'on', expected: false },
+  { ref: 'TR9988', expected: true },
+  { ref: 'FT26277', expected: true },
+  { ref: 'AW9876', expected: true },
+  { ref: 'CR12345', expected: true },
+  { ref: 'AW123456', expected: true },
+];
+
+let refPassed = 0;
+for (const rc of refChecks) {
+  const actual = RegexParser.isValidReference(rc.ref);
+  if (actual === rc.expected) {
+    console.log(`✅ Ref '${rc.ref}' validity: ${actual} (expected ${rc.expected})`);
+    refPassed++;
+  } else {
+    console.error(`❌ Ref '${rc.ref}' failed: got ${actual}, expected ${rc.expected}`);
+  }
+}
+
+console.log(`\nResults: ${passed} of ${testCases.length} parser tests passed.`);
+console.log(`Reference validation: ${refPassed} of ${refChecks.length} checks passed.\n`);
+
+if (passed !== testCases.length || refPassed !== refChecks.length) {
   process.exit(1);
 }
