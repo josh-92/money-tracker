@@ -17,6 +17,7 @@ import {
   ScrollView,
   Alert,
   Switch,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ShieldCheck, Lock, CheckCircle2, AlertTriangle, ArrowRight } from 'lucide-react-native';
@@ -68,6 +69,8 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
   };
 
   const handleCompleteSetup = async (skipPasscode = false) => {
+    if (loading) return;
+
     if (!skipPasscode && passcode.length > 0) {
       if (passcode.length !== 4) {
         Alert.alert('Invalid Passcode', 'App passcode must be exactly 4 digits.');
@@ -110,10 +113,9 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
         themePreference: isDark ? 'dark' : 'light',
       });
 
-      onComplete();
+      await onComplete();
     } catch (err: any) {
       Alert.alert('Setup Error', err.message || 'Failed to initialize local vault.');
-    } finally {
       setLoading(false);
     }
   };
@@ -264,23 +266,47 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete, 
             )}
 
             <TouchableOpacity
-              style={[styles.primaryButton, { backgroundColor: theme.primary }]}
+              style={[
+                styles.primaryButton,
+                { backgroundColor: theme.primary },
+                loading && { opacity: 0.65 },
+              ]}
               onPress={() => handleCompleteSetup(false)}
               disabled={loading}
+              activeOpacity={0.8}
             >
-              <Text style={styles.buttonText}>{loading ? 'Creating Vault...' : 'Finish Setup & Enter Vault'}</Text>
-              <CheckCircle2 size={18} color="#FFFFFF" style={{ marginLeft: 6 }} />
+              {loading ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                  <Text style={styles.buttonText}>Setting up your private vault…</Text>
+                </View>
+              ) : (
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                  <Text style={styles.buttonText}>Finish Setup & Enter Vault</Text>
+                  <CheckCircle2 size={18} color="#FFFFFF" style={{ marginLeft: 6 }} />
+                </View>
+              )}
             </TouchableOpacity>
 
             {!showSkipWarning && passcode.length === 0 && (
-              <TouchableOpacity style={styles.skipButton} onPress={() => setShowSkipWarning(true)}>
+              <TouchableOpacity
+                style={[styles.skipButton, loading && { opacity: 0.5 }]}
+                onPress={() => setShowSkipWarning(true)}
+                disabled={loading}
+              >
                 <Text style={[styles.skipButtonText, { color: theme.textMuted }]}>Skip Passcode for Now</Text>
               </TouchableOpacity>
             )}
 
             {showSkipWarning && (
-              <TouchableOpacity style={styles.skipButton} onPress={() => handleCompleteSetup(true)}>
-                <Text style={[styles.skipButtonText, { color: theme.warning }]}>Confirm & Continue Without Passcode</Text>
+              <TouchableOpacity
+                style={[styles.skipButton, loading && { opacity: 0.5 }]}
+                onPress={() => handleCompleteSetup(true)}
+                disabled={loading}
+              >
+                <Text style={[styles.skipButtonText, { color: theme.warning }]}>
+                  {loading ? 'Setting up vault...' : 'Confirm & Continue Without Passcode'}
+                </Text>
               </TouchableOpacity>
             )}
           </View>

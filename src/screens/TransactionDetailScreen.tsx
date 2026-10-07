@@ -15,6 +15,10 @@ import {
   ScrollView,
   TouchableOpacity,
   Platform,
+  ActivityIndicator,
+  Modal,
+  TextInput,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -31,16 +35,17 @@ import {
   Cpu,
   History,
   Info,
+  Edit3,
+  Check,
 } from 'lucide-react-native';
 import { spacing, layout, borderRadius } from '../theme/spacing';
 import { typography } from '../theme/typography';
 import { darkTheme, lightTheme, ColorTheme } from '../theme/colors';
 import { VaultCard } from '../components/VaultCard';
-import { Transaction } from '../types/database';
+import { Transaction, Category } from '../types/database';
 import { useBalanceVisibility } from '../context/BalanceVisibilityContext';
 import { dbService } from '../database/DatabaseService';
 import { ProviderLogo } from '../components/ProviderLogo';
-import { ActivityIndicator } from 'react-native';
 
 interface TransactionDetailScreenProps {
   route: {
@@ -64,12 +69,61 @@ export const TransactionDetailScreen: React.FC<TransactionDetailScreenProps> = (
   );
   const { formatAmount } = useBalanceVisibility();
   const [showMoreDetails, setShowMoreDetails] = useState(false);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [categoryModalVisible, setCategoryModalVisible] = useState(false);
+  const [remarkModalVisible, setRemarkModalVisible] = useState(false);
+  const [remarkInput, setRemarkInput] = useState('');
+
+  useEffect(() => {
+    dbService.getCategories().then(setCategories).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!transaction && route.params?.id) {
       dbService.getTransactionById(route.params.id).then(setTransaction);
     }
   }, [route.params]);
+
+  const handleSelectCategory = async (category: Category) => {
+    if (!transaction) return;
+    try {
+      await dbService.updateTransaction(transaction.id, { categoryId: category.id });
+      setTransaction((prev) =>
+        prev
+          ? {
+              ...prev,
+              categoryId: category.id,
+              categoryName: category.name,
+              categoryColor: category.colorHex,
+              userEditedAt: new Date().toISOString(),
+            }
+          : null
+      );
+      setCategoryModalVisible(false);
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to update category.');
+    }
+  };
+
+  const handleSaveRemark = async () => {
+    if (!transaction) return;
+    try {
+      const trimmed = remarkInput.trim() || null;
+      await dbService.updateTransaction(transaction.id, { notes: trimmed });
+      setTransaction((prev) =>
+        prev
+          ? {
+              ...prev,
+              notes: trimmed,
+              userEditedAt: new Date().toISOString(),
+            }
+          : null
+      );
+      setRemarkModalVisible(false);
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to update remark.');
+    }
+  };
 
   if (!transaction) {
     return (
@@ -149,15 +203,22 @@ export const TransactionDetailScreen: React.FC<TransactionDetailScreenProps> = (
             </View>
           </View>
 
-          <View style={[styles.detailRow, { borderTopWidth: 1, borderTopColor: theme.surfaceBorder, paddingTop: spacing.xs }]}>
+          <TouchableOpacity
+            style={[styles.detailRow, { borderTopWidth: 1, borderTopColor: theme.surfaceBorder, paddingTop: spacing.xs }]}
+            onPress={() => setCategoryModalVisible(true)}
+            activeOpacity={0.7}
+          >
             <View style={styles.detailLeft}>
               <Tag size={16} color={theme.income} />
               <Text style={[styles.detailLabel, { color: theme.textSecondary }]}>Category</Text>
             </View>
-            <Text style={[styles.detailValue, { color: theme.textPrimary }]}>
-              {transaction.categoryName || 'Uncategorized'}
-            </Text>
-          </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={[styles.detailValue, { color: theme.textPrimary }]}>
+                {transaction.categoryName || 'Uncategorized'}
+              </Text>
+              <Edit3 size={13} color={theme.textMuted} />
+            </View>
+          </TouchableOpacity>
 
           <View style={[styles.detailRow, { borderTopWidth: 1, borderTopColor: theme.surfaceBorder, paddingTop: spacing.xs }]}>
             <View style={styles.detailLeft}>
@@ -169,17 +230,25 @@ export const TransactionDetailScreen: React.FC<TransactionDetailScreenProps> = (
             </Text>
           </View>
 
-          {transaction.notes && (
-            <View style={[styles.detailRow, { borderTopWidth: 1, borderTopColor: theme.surfaceBorder, paddingTop: spacing.xs }]}>
-              <View style={styles.detailLeft}>
-                <Info size={16} color={theme.textMuted} />
-                <Text style={[styles.detailLabel, { color: theme.textSecondary }]}>Notes</Text>
-              </View>
-              <Text style={[styles.detailValue, { color: theme.textPrimary, flex: 1, textAlign: 'right' }]}>
-                {transaction.notes}
-              </Text>
+          <TouchableOpacity
+            style={[styles.detailRow, { borderTopWidth: 1, borderTopColor: theme.surfaceBorder, paddingTop: spacing.xs }]}
+            onPress={() => {
+              setRemarkInput(transaction.notes || '');
+              setRemarkModalVisible(true);
+            }}
+            activeOpacity={0.7}
+          >
+            <View style={styles.detailLeft}>
+              <Info size={16} color={theme.textMuted} />
+              <Text style={[styles.detailLabel, { color: theme.textSecondary }]}>Notes / Remark</Text>
             </View>
-          )}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1, justifyContent: 'flex-end' }}>
+              <Text style={[styles.detailValue, { color: transaction.notes ? theme.textPrimary : theme.textMuted, maxWidth: '75%' }]} numberOfLines={1}>
+                {transaction.notes || 'None (tap to add)'}
+              </Text>
+              <Edit3 size={13} color={theme.textMuted} />
+            </View>
+          </TouchableOpacity>
         </VaultCard>
 
         {/* Expandable Technical / Audit Details Button */}
@@ -325,6 +394,127 @@ export const TransactionDetailScreen: React.FC<TransactionDetailScreenProps> = (
           </View>
         )}
       </ScrollView>
+
+      {/* Category Selection Modal */}
+      <Modal
+        visible={categoryModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCategoryModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.surface, borderColor: theme.surfaceBorder }]}>
+            <View style={styles.modalHeader}>
+              <View style={[styles.modalIconCircle, { backgroundColor: theme.incomeBackground }]}>
+                <Tag size={22} color={theme.income} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Change Category</Text>
+                <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
+                  Select category for this transaction
+                </Text>
+              </View>
+            </View>
+
+            <ScrollView style={styles.categoryList} showsVerticalScrollIndicator={false}>
+              {categories.map((cat) => {
+                const isSelected = transaction.categoryId === cat.id;
+                return (
+                  <TouchableOpacity
+                    key={cat.id}
+                    style={[
+                      styles.categoryOption,
+                      {
+                        borderColor: isSelected ? theme.primary : theme.surfaceBorder,
+                        backgroundColor: isSelected ? theme.primaryGlow : theme.surfaceHighlight,
+                      },
+                    ]}
+                    onPress={() => handleSelectCategory(cat)}
+                  >
+                    <View
+                      style={[
+                        styles.categoryOptionCircle,
+                        { backgroundColor: cat.colorHex + '25' },
+                      ]}
+                    >
+                      <Tag size={16} color={cat.colorHex} />
+                    </View>
+                    <Text style={[styles.categoryOptionName, { color: theme.textPrimary, flex: 1 }]}>
+                      {cat.name}
+                    </Text>
+                    {isSelected && <Check size={18} color={theme.primary} />}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={[styles.modalCancelBtn, { borderColor: theme.surfaceBorder }]}
+              onPress={() => setCategoryModalVisible(false)}
+            >
+              <Text style={[styles.modalCancelBtnText, { color: theme.textSecondary }]}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Remark / Notes Modal */}
+      <Modal
+        visible={remarkModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRemarkModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.surface, borderColor: theme.surfaceBorder }]}>
+            <View style={styles.modalHeader}>
+              <View style={[styles.modalIconCircle, { backgroundColor: theme.primaryGlow }]}>
+                <FileText size={22} color={theme.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Transaction Remark / Notes</Text>
+                <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
+                  Personal notes, counterparty, or transaction purpose:
+                </Text>
+              </View>
+            </View>
+
+            <TextInput
+              style={[
+                styles.remarkInput,
+                {
+                  backgroundColor: theme.surfaceHighlight,
+                  borderColor: theme.surfaceBorder,
+                  color: theme.textPrimary,
+                },
+              ]}
+              placeholder="e.g. Lunch with Abebe, Electricity bill, Salary transfer"
+              placeholderTextColor={theme.textMuted}
+              value={remarkInput}
+              onChangeText={setRemarkInput}
+              multiline
+              numberOfLines={3}
+              maxLength={200}
+            />
+
+            <View style={styles.modalActionButtonsRow}>
+              <TouchableOpacity
+                style={[styles.modalCancelBtn, { borderColor: theme.surfaceBorder, flex: 1 }]}
+                onPress={() => setRemarkModalVisible(false)}
+              >
+                <Text style={[styles.modalCancelBtnText, { color: theme.textSecondary }]}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalSaveBtn, { backgroundColor: theme.primary, flex: 1 }]}
+                onPress={handleSaveRemark}
+              >
+                <Text style={styles.modalSaveBtnText}>Save Remark</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -458,5 +648,98 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 16,
     fontStyle: 'italic',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    padding: layout.screenPadding,
+  },
+  modalContent: {
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    padding: spacing.lg,
+    maxHeight: '80%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: spacing.md,
+  },
+  modalIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalTitle: {
+    fontSize: typography.fontSize.md,
+    fontWeight: typography.fontWeight.bold,
+  },
+  modalSubtitle: {
+    fontSize: typography.fontSize.xs,
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  categoryList: {
+    maxHeight: 280,
+    marginVertical: spacing.sm,
+  },
+  categoryOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    marginBottom: 8,
+    gap: 10,
+  },
+  categoryOptionCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  categoryOptionName: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+  },
+  remarkInput: {
+    borderWidth: 1,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    fontSize: typography.fontSize.sm,
+    minHeight: 80,
+    textAlignVertical: 'top',
+    marginVertical: spacing.md,
+  },
+  modalActionButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  modalSaveBtn: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderRadius: borderRadius.md,
+  },
+  modalSaveBtnText: {
+    color: '#FFFFFF',
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.bold,
+  },
+  modalCancelBtn: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    marginTop: spacing.xs,
+  },
+  modalCancelBtnText: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
   },
 });

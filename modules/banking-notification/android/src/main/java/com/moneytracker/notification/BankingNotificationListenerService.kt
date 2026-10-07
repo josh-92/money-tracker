@@ -98,93 +98,96 @@ class BankingNotificationListenerService : NotificationListenerService() {
         linesTexts.forEach { if (it.isNotBlank()) candidates.add(it) }
 
         val rawText = candidates.maxByOrNull { it.length } ?: ""
+        if (rawText.isBlank()) return
 
         val textLower = rawText.lowercase()
         val titleLower = title.lowercase()
 
-        // 1. Known Ethiopian Banking, Wallet & Messaging packages
-        val isCandidatePackage = pkg.contains("tydic.ethiopay") ||
-                pkg.contains("telebirr") ||
-                pkg.contains("combanketh") ||
-                pkg.contains("cbebirr") ||
-                pkg.contains("cbe") ||
-                pkg.contains("awash") ||
-                pkg.contains("boa") ||
-                pkg.contains("abyssinia") ||
-                pkg.contains("dashen") ||
-                pkg.contains("wegagen") ||
-                pkg.contains("hibret") ||
-                pkg.contains("coop") ||
-                pkg.contains("zemen") ||
-                pkg.contains("nib") ||
-                pkg.contains("oromia") ||
-                pkg.contains("bank") ||
-                pkg.contains("wallet") ||
-                pkg.contains("pay") ||
-                pkg.contains("messaging") ||
-                pkg.contains("message") ||
-                pkg.contains("mms") ||
-                pkg.contains("sms") ||
-                pkg.contains("truecaller") ||
-                pkg.contains("inbox") ||
-                pkg.contains("telecom")
-
-        // 2. Comprehensive Financial Keywords Gate (English & Amharic)
-        val containsBankingKeywords = textLower.contains("cbe") ||
-                textLower.contains("telebirr") ||
-                textLower.contains("awash") ||
-                textLower.contains("awashbirr") ||
-                textLower.contains("birr") ||
-                textLower.contains("etb") ||
-                textLower.contains("debited") ||
-                textLower.contains("credited") ||
-                textLower.contains("transferred") ||
-                textLower.contains("transfer") ||
-                textLower.contains("sent") ||
-                textLower.contains("paid") ||
-                textLower.contains("received") ||
-                textLower.contains("deposit") ||
-                textLower.contains("withdrawn") ||
-                textLower.contains("balance") ||
-                textLower.contains("account") ||
-                textLower.contains("txn") ||
-                textLower.contains("ref") ||
-                textLower.contains("reference") ||
-                textLower.contains("127") ||
-                textLower.contains("8900") ||
-                textLower.contains("951") ||
-                textLower.contains("ወጪ") ||
-                textLower.contains("ገቢ") ||
-                textLower.contains("ብር") ||
-                textLower.contains("ክፍያ") ||
-                textLower.contains("አስተላልፈዋል") ||
-                textLower.contains("ተቀብለዋል") ||
-                textLower.contains("ቀሪ") ||
-                textLower.contains("ቴሌብር") ||
-                textLower.contains("አዋሽ") ||
-                textLower.contains("የሂሳብ") ||
-                textLower.contains("ሒሳብ") ||
-                titleLower.contains("cbe") ||
-                titleLower.contains("telebirr") ||
-                titleLower.contains("awash") ||
-                titleLower.contains("awashbirr") ||
-                titleLower.contains("127") ||
-                titleLower.contains("8900") ||
-                titleLower.contains("951") ||
-                titleLower.contains("bank") ||
-                titleLower.contains("ቴሌብር") ||
-                titleLower.contains("አዋሽ")
-
-        val isCandidate = (isCandidatePackage || containsBankingKeywords) && rawText.isNotBlank()
-
-        // Development diagnostic log per user requirement
-        val preview = if (rawText.length > 50) rawText.take(50) + "..." else rawText
-        Log.i("BankingNotification", "[NOTIF:NATIVE] posted: pkg=$pkg, title=$title, rawTextLen=${rawText.length}, isCandidate=$isCandidate")
-
-        if (!isCandidate) {
+        // 1. Immediately drop non-financial apps (Telegram, WhatsApp, social apps)
+        val isNonFinancialApp = pkg.contains("telegram") ||
+                pkg.contains("challegram") ||
+                pkg.contains("whatsapp") ||
+                pkg.contains("facebook") ||
+                pkg.contains("instagram") ||
+                pkg.contains("twitter") ||
+                pkg.contains("viber") ||
+                pkg.contains("discord") ||
+                pkg.contains("tiktok")
+        if (isNonFinancialApp) {
             return
         }
 
+        // 2. Strict Trusted Financial Source Identification
+        // Official Android apps: Telebirr, CBE, Awash
+        val isOfficialBankingApp = pkg.contains("tydic.ethiopay") ||
+                pkg.contains("telebirr") ||
+                pkg.contains("ethiomobilemoney") ||
+                pkg.contains("combanketh") ||
+                pkg.contains("cbebirr") ||
+                pkg.contains("awashpay") ||
+                pkg.contains("awash")
+
+        // Trusted SMS senders for banking notifications (Telebirr 127, Awash 8900, CBE 951)
+        val isTrustedSmsSender = titleLower == "127" ||
+                titleLower == "8900" ||
+                titleLower == "951" ||
+                titleLower.contains("telebirr") ||
+                titleLower.contains("ቴሌብር") ||
+                titleLower.contains("awash") ||
+                titleLower.contains("አዋሽ") ||
+                titleLower.contains("cbe") ||
+                titleLower.contains("commercial bank")
+
+        // Reject notifications from untrusted sources (131, friends' SMS, random apps)
+        if (!isOfficialBankingApp && !isTrustedSmsSender) {
+            Log.d("BankingNotification", "[NOTIF:NATIVE] Ignored non-trusted source: pkg=$pkg, title=$title")
+            return
+        }
+
+        // 3. Security, OTP, and PIN Error Guard (even from trusted senders)
+        val isSecurityOrPinError = textLower.contains("incorrect") ||
+                textLower.contains("wrong") ||
+                textLower.contains("sorry") ||
+                textLower.contains("ተሳስቷል") ||
+                textLower.contains("verification code") ||
+                textLower.contains("your otp") ||
+                textLower.contains("is your otp") ||
+                textLower.contains("security code") ||
+                textLower.contains("reset your password") ||
+                textLower.contains("የማረጋገጫ ኮድ") ||
+                textLower.contains("package has been activated") ||
+                textLower.contains("internet package") ||
+                textLower.contains("service notification")
+
+        // 4. Financial Movement Verification
+        val hasMovementKeywords = textLower.contains("debited") ||
+                textLower.contains("credited") ||
+                textLower.contains("transferred") ||
+                textLower.contains("transfer") ||
+                textLower.contains("paid") ||
+                textLower.contains("received") ||
+                textLower.contains("bought") ||
+                textLower.contains("payment of") ||
+                textLower.contains("ወጪ") ||
+                textLower.contains("ገቢ") ||
+                textLower.contains("ክፍያ") ||
+                textLower.contains("አስተላልፈዋል") ||
+                textLower.contains("ተቀብለዋል")
+
+        if (isSecurityOrPinError && !hasMovementKeywords) {
+            Log.i("BankingNotification", "[NOTIF:NATIVE] Discarded security/auth/service alert from trusted sender: pkg=$pkg, title=$title")
+            return
+        }
+
+        if (!hasMovementKeywords) {
+            Log.d("BankingNotification", "[NOTIF:NATIVE] Ignored message without financial movement: pkg=$pkg, title=$title")
+            return
+        }
+
+        val isCandidate = true
+
+        // Development diagnostic log per user requirement
+        val preview = if (rawText.length > 50) rawText.take(50) + "..." else rawText
         Log.i("BankingNotification", "[NOTIF:NATIVE] candidate accepted -> enqueued: pkg=$pkg, title=$title, preview=$preview")
 
         val timestamp = sbn.postTime

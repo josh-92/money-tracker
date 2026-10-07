@@ -45,82 +45,174 @@ export class ProviderDetector {
       };
     }
 
-    // 1. Strict Security & Privacy Filter: Reject pure OTP / Verification messages
+    // 1. Language Identification
+    const isAmharic = /[\u1200-\u137F]/.test(raw);
+    const language: 'EN' | 'AM' = isAmharic ? 'AM' : 'EN';
+
+    // 2. Strict Source Gate for NOTIFICATIONS
+    // Notifications MUST come from a trusted financial identity (official package or verified shortcode/sender)
+    if (candidate.source === 'NOTIFICATION') {
+      const isOfficialTelebirr =
+        pkg.includes('tydic.ethiopay') ||
+        pkg.includes('telebirr') ||
+        pkg.includes('ethiomobilemoney') ||
+        sender === '127' ||
+        title === '127' ||
+        sender.includes('TELEBIRR') ||
+        title.includes('TELEBIRR') ||
+        title.includes('ቴሌብር');
+
+      const isOfficialCBE =
+        pkg.includes('combanketh') ||
+        pkg.includes('cbebirr') ||
+        sender === '951' ||
+        title === '951' ||
+        sender.includes('CBE') ||
+        title.includes('CBE') ||
+        sender.includes('COMMERCIAL BANK') ||
+        title.includes('COMMERCIAL BANK');
+
+      const isOfficialAwash =
+        pkg.includes('awashpay') ||
+        pkg.includes('awash') ||
+        sender === '8900' ||
+        title === '8900' ||
+        sender.includes('AWASH') ||
+        title.includes('AWASH') ||
+        title.includes('አዋሽ');
+
+      if (!isOfficialTelebirr && !isOfficialCBE && !isOfficialAwash) {
+        return {
+          isCandidate: false,
+          provider: 'UNKNOWN',
+          templateCategory: 'UNKNOWN',
+          language,
+          reason: 'Notification from untrusted source discarded (e.g. 131, Telegram, generic SMS).',
+        };
+      }
+    }
+
+    // 3. Strict Content Gate for CLIPBOARD
+    if (candidate.source === 'CLIPBOARD') {
+      // Discard developer logs, stack traces, API error strings, JSON, URLs
+      const isDevArtifact =
+        /^(?:error:|exception:|traceback|fail|at\s+[\w\.\/]+:\d+|npm|npx|git|\{|\[|<|http[s]?:\/\/)/i.test(raw) ||
+        /\b(?:console\.log|undefined|null|TypeError|SyntaxError|ReferenceError)\b/i.test(raw);
+      if (isDevArtifact) {
+        return {
+          isCandidate: false,
+          provider: 'UNKNOWN',
+          templateCategory: 'UNKNOWN',
+          language,
+          reason: 'Development artifact or error log discarded from clipboard.',
+        };
+      }
+
+      // Clipboard MUST contain a recognizable monetary amount with currency
+      const hasMonetaryAmount = /(?:ETB|ብር)\s*[\d,]+(?:\.\d{1,2})?|[\d,]+(?:\.\d{1,2})?\s*(?:ETB|ብር)/i.test(raw);
+      if (!hasMonetaryAmount) {
+        return {
+          isCandidate: false,
+          provider: 'UNKNOWN',
+          templateCategory: 'UNKNOWN',
+          language,
+          reason: 'Clipboard text lacks valid monetary amount and currency.',
+        };
+      }
+    }
+
+    // 4. Strict Security, Authentication & PIN Failure Filter (All sources)
+    const isPinOrSecurityError =
+      /(?:pin|password|credential|login).*(?:incorrect|wrong|failed|invalid|error|sorry)|sorry.*(?:pin|password)|ሚስጥራዊ\s*ቁጥር.*ተሳስቷል/i.test(raw);
+    const isServiceOrPromo =
+      /(?:package\s*has\s*been\s*activated|internet\s*package|bonus|unlimited\s*voice|service\s*notification|monthly\s*fee)/i.test(raw);
     const isPureOtp =
-      /\b(verification\s*code|one[-\s]time[-\s]password|your\s*otp\s*is|is\s*your\s*otp|security\s*code|auth\s*code)\b/i.test(raw) ||
+      /\b(verification\s*code|one[-\s]time[-\s]password|your\s*otp\s*is|is\s*your\s*otp|security\s*code|auth\s*code|reset\s*your\s*password)\b/i.test(raw) ||
       /የማረጋገጫ\s*ኮድ|ይህን\s*ሚስጥራዊ\s*ቁጥር|የይለፍ\s*ቃል/i.test(raw);
 
     const hasFinancialMovement =
-      /\b(debited|credited|paid|transferred|received|withdrawn|bought|ETB|balance)\b/i.test(raw) ||
-      /ወጪ|ገቢ|ክፍያ|አስተላልፈዋል|ተቀብለዋል|ቀሪ\s*ሂሳብ|ብር/i.test(raw);
+      /\b(debited|credited|paid|transferred|received|withdrawn|bought\s+ETB.*airtime|payment\s+of)\b/i.test(raw) ||
+      /ወጪ|ገቢ|ክፍያ|አስተላልፈዋል|ተቀብለዋል|ተልኳል/i.test(raw);
+
+    if (isPinOrSecurityError || isServiceOrPromo) {
+      return {
+        isCandidate: false,
+        provider: 'UNKNOWN',
+        templateCategory: 'UNKNOWN',
+        language,
+        reason: 'Security alert, PIN failure, or telecom service notification discarded.',
+      };
+    }
 
     if (isPureOtp && !hasFinancialMovement) {
       return {
         isCandidate: false,
         provider: 'UNKNOWN',
         templateCategory: 'UNKNOWN',
-        language: 'EN',
+        language,
         reason: 'Security code / OTP discarded for privacy.',
       };
     }
 
-    // 2. Identify Language
-    const isAmharic = /[\u1200-\u137F]/.test(raw);
-    const language: 'EN' | 'AM' = isAmharic ? 'AM' : 'EN';
+    if (!hasFinancialMovement) {
+      return {
+        isCandidate: false,
+        provider: 'UNKNOWN',
+        templateCategory: 'UNKNOWN',
+        language,
+        reason: 'Text contains no financial transaction movement.',
+      };
+    }
 
-    // 3. Provider Resolution
+    // 5. Provider Resolution
     let provider: ProviderKey | 'UNKNOWN' = 'UNKNOWN';
 
-    // Check Package Name first (Android notifications from official apps)
+    // A. Package Name / Official Sender hint
     if (pkg.includes('tydic.ethiopay') || pkg.includes('telebirr') || pkg.includes('ethiomobilemoney')) {
       provider = 'TELEBIRR';
-    } else if (pkg.includes('combanketh') || pkg.includes('cbebirr') || pkg.includes('cbe')) {
+    } else if (pkg.includes('combanketh') || pkg.includes('cbebirr')) {
       provider = 'CBE';
-    } else if (pkg.includes('awash') || pkg.includes('awashpay')) {
+    } else if (pkg.includes('awashpay') || pkg.includes('awash')) {
       provider = 'AWASH';
     }
 
-    // Check Sender Shortcode / Title if not resolved
     if (provider === 'UNKNOWN') {
       if (
         sender === '127' ||
         sender.includes('TELEBIRR') ||
-        sender.includes('ETHIOTELECOM') ||
         title === '127' ||
         title.includes('TELEBIRR') ||
         title.includes('ቴሌብር')
       ) {
         provider = 'TELEBIRR';
       } else if (
+        sender === '951' ||
         sender.includes('CBE') ||
         sender.includes('COMMERCIAL BANK') ||
-        sender === '951' ||
+        title === '951' ||
         title.includes('CBE') ||
-        title.includes('COMMERCIAL BANK') ||
-        title.includes('951')
+        title.includes('COMMERCIAL BANK')
       ) {
         provider = 'CBE';
       } else if (
-        sender.includes('AWASH') ||
         sender === '8900' ||
+        sender.includes('AWASH') ||
+        title === '8900' ||
         title.includes('AWASH') ||
-        title.includes('8900') ||
         title.includes('አዋሽ')
       ) {
         provider = 'AWASH';
       }
     }
 
-    // Text-based heuristics if sender is missing or generic (e.g. from clipboard or manual paste)
+    // B. Deterministic Content Signatures (for clipboard / SMS / manual text)
     if (provider === 'UNKNOWN') {
       if (
         /\b(?:telebirr|127|cn\.tydic\.ethiopay)\b/i.test(raw) ||
         /ቴሌብር|የቴሌብር/i.test(raw) ||
-        /(?:Transaction\s+number|Txn\s+(?:number|ID|No)|Transaction\s+ID)(?:\s+is)?[:\s]*(?:CR|TR|RC|AT|CO|CI)[A-Z0-9]+/i.test(raw) ||
-        /የግብይት\s*ቁጥር[:\s]*(?:CR|TR|RC|AT|CO|CI)[A-Z0-9]+/i.test(raw) ||
-        /(?:transferred|sent)\s+ETB\s+[\d,]+/i.test(raw) ||
-        /(?:ወደ|ለ)\s+.+?\s+የ\s*[\d,]+\s*ብር\s*አስተላልፈዋል/i.test(raw) ||
-        /የ\s*[\d,]+\s*ብር\s*(?:ወደ|ለ)\s+.+?\s*አስተላልፈዋል/i.test(raw)
+        /(?:Transaction\s+number|Txn\s+(?:number|ID|No)|Transaction\s+ID)(?:\s+is)?[:\s]*(?:CR|TR|RC|AT|CO|CI)\d[A-Z0-9]{3,}/i.test(raw) ||
+        /የግብይት\s*ቁጥር[:\s]*(?:CR|TR|RC|AT|CO|CI)\d[A-Z0-9]{3,}/i.test(raw) ||
+        /\b(?:CR|TR|RC|AT|CO|CI)\d[A-Z0-9]{3,}\b/i.test(raw)
       ) {
         provider = 'TELEBIRR';
       } else if (
@@ -134,26 +226,27 @@ export class ProviderDetector {
         /\b(?:Awash Bank|Awash|AwashBirr|8900)\b/i.test(raw) ||
         /(?:Reference|Ref|Txn ID|Txn)(?:\s+is)?[:\s]+AW\d+/i.test(raw) ||
         /\bAW\d{4,}\b/i.test(raw) ||
-        /payment\s+of\s+[\d,]+(?:\.\d{1,2})?\s*ETB\s+charge/i.test(raw) ||
         /አዋሽ\s*ባንክ|አዋሽ/i.test(raw) ||
-        /(?:account|Acc\.?)\s*[*xX\d]+\s+(?:has\s+been|is|was)?\s*(?:debited|credited)/i.test(raw)
+        /(?:account|Acc\.?)\s*(?:0132[*xX\d]+|[*xX\d]+3901)\s+(?:has\s+been|is|was)?\s*(?:debited|credited)/i.test(raw)
       ) {
         provider = 'AWASH';
       } else if (/transferred\s+to\s+other\s+bank/i.test(raw)) {
-        if (/FT\d+/i.test(raw)) provider = 'CBE';
+        if (/FT\d+/i.test(raw) || /CBE/i.test(raw)) provider = 'CBE';
         else if (/AW\d+|Awash/i.test(raw)) provider = 'AWASH';
-        else provider = 'CBE';
+        else if (sender.includes('CBE') || title.includes('CBE')) provider = 'CBE';
+        else if (sender.includes('AWASH') || title.includes('AWASH')) provider = 'AWASH';
       }
     }
 
-    // 4. Privacy Check: If provider is still UNKNOWN and there's no clear financial marker, reject!
-    if (provider === 'UNKNOWN' && !hasFinancialMovement) {
+    // 6. Absolute Provider Isolation Invariant:
+    // If provider cannot be established, the message is NOT an eligible transaction candidate!
+    if (provider === 'UNKNOWN') {
       return {
         isCandidate: false,
         provider: 'UNKNOWN',
         templateCategory: 'UNKNOWN',
         language,
-        reason: 'Non-banking text discarded.',
+        reason: 'Text discarded: financial provider identity could not be verified.',
       };
     }
 

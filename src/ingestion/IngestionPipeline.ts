@@ -72,7 +72,7 @@ export class IngestionPipeline {
     try {
       // Step 1: Privacy Gatekeeper & Provider Detection
       const detection = ProviderDetector.detect(candidate);
-      if (!detection.isCandidate) {
+      if (!detection.isCandidate || detection.provider === 'UNKNOWN') {
         return {
           success: false,
           isDuplicate: false,
@@ -81,8 +81,8 @@ export class IngestionPipeline {
         };
       }
 
-      // Step 2: Deterministic Regex Parsing
-      const parsed = RegexParser.parse(candidate.rawText, candidate.senderHint);
+      // Step 2: Deterministic Regex Parsing WITH STRICT PROVIDER ISOLATION
+      const parsed = RegexParser.parse(candidate.rawText, candidate.senderHint, detection.provider);
       console.log(`[PIPELINE:PARSER] parse: success=${!!parsed}, provider=${parsed?.provider || 'none'}, amount=${parsed?.amount || 0}, type=${parsed?.type || 'none'}`);
       if (!parsed) {
         console.warn(`[PIPELINE:PARSER] Failed to parse candidate rawText: "${candidate.rawText.substring(0, 60)}..."`);
@@ -311,9 +311,8 @@ export class IngestionPipeline {
     );
     if (providerMatch) return providerMatch;
 
-    // 3. Fallback to first active account
-    const active = accounts.find((a) => a.isActive);
-    return active || accounts[0];
+    // 3. Return null if no matching account exists (never assign to unrelated provider account)
+    return null;
   }
 }
 

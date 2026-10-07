@@ -99,6 +99,18 @@ class MockDatabaseService {
       target.status = 'CONFIRMED';
     }
   }
+
+  public async updateTransaction(id: string, updates: any): Promise<void> {
+    const target = this.transactions.find((t) => t.id === id);
+    if (target) {
+      if (updates.categoryId !== undefined) target.categoryId = updates.categoryId;
+      if (updates.notes !== undefined) target.notes = updates.notes;
+      if (updates.cleanMerchant !== undefined) target.cleanMerchant = updates.cleanMerchant;
+      if (updates.amount !== undefined) target.amount = updates.amount;
+      target.userEditedAt = new Date().toISOString();
+      target.updatedAt = new Date().toISOString();
+    }
+  }
 }
 
 async function runTests() {
@@ -260,6 +272,121 @@ async function runTests() {
     simulatedSecureStore.delete(`${TOUR_PREFIX}${tab}`);
   }
   assert(simulatedSecureStore.size === 0, 'Replaying app tours clears all 4 flags, re-enabling coach marks');
+
+  // -------------------------------------------------------------------------
+  // TEST 6: FALSE-POSITIVE ELIMINATION (Logs, Telegram, 131, PIN Failure)
+  // -------------------------------------------------------------------------
+  console.log('\n--- 6. False-Positive Elimination ---');
+
+  // 6.1: Developer API error log copied to clipboard
+  const errorLogMsg: CandidateMessage = {
+    id: 'err_log_1',
+    source: 'CLIPBOARD',
+    rawText: 'Error: API error (attempt 1): request failed at line 42 transferred ETB 15 to Abebe',
+    timestamp: new Date().toISOString(),
+  };
+  const errRes = await pipeline.processCandidate(errorLogMsg);
+  assert(!errRes.success && (errRes.status === 'NOT_FINANCIAL' || errRes.status === 'UNPARSED'), 'Developer error log copied to clipboard is strictly rejected');
+
+  // 6.2: Non-financial app notification (Telegram)
+  const telegramMsg: CandidateMessage = {
+    id: 'tg_msg_1',
+    source: 'NOTIFICATION',
+    rawText: 'Abebe sent ETB 500 to you',
+    packageName: 'org.telegram.messenger',
+    timestamp: new Date().toISOString(),
+  };
+  const tgRes = await pipeline.processCandidate(telegramMsg);
+  assert(!tgRes.success && tgRes.status === 'UNPARSED', 'Telegram notifications are strictly rejected at the gate');
+
+  // 6.3: Untrusted SMS sender (131 recharge/promo SMS)
+  const serviceSms: CandidateMessage = {
+    id: 'sms_131_1',
+    source: 'NOTIFICATION',
+    rawText: 'Dear customer, recharge your account with ETB 50 to get 1GB bonus',
+    senderHint: '131',
+    timestamp: new Date().toISOString(),
+  };
+  const smsRes = await pipeline.processCandidate(serviceSms);
+  assert(!smsRes.success && smsRes.status === 'UNPARSED', '131 telecom service notifications are rejected');
+
+  // 6.4: PIN failure alert
+  const pinFailureMsg: CandidateMessage = {
+    id: 'pin_fail_1',
+    source: 'NOTIFICATION',
+    rawText: 'Sorry, your PIN or password is incorrect. Please try again.',
+    packageName: 'cn.tydic.ethiopay',
+    timestamp: new Date().toISOString(),
+  };
+  const pinRes = await pipeline.processCandidate(pinFailureMsg);
+  assert(!pinRes.success && pinRes.status === 'UNPARSED', 'PIN failure alerts are rejected as non-financial');
+
+  // -------------------------------------------------------------------------
+  // TEST 7: STRICT PROVIDER ISOLATION (No Cross-Provider Fallback)
+  // -------------------------------------------------------------------------
+  console.log('\n--- 7. Strict Provider Isolation ---');
+
+  // Telebirr notification with foreign/unsupported pattern should NOT fall through to Awash
+  const telebirrOddMsg: CandidateMessage = {
+    id: 'tb_odd_1',
+    source: 'NOTIFICATION',
+    rawText: 'Telebirr payment notice: custom merchant fee 15 ETB Abebe pro pay',
+    packageName: 'cn.tydic.ethiopay',
+    timestamp: new Date().toISOString(),
+  };
+  const tbOddRes = await pipeline.processCandidate(telebirrOddMsg);
+  // Must either be a valid Telebirr parse or unparsed; NEVER provider AWASH
+  if (tbOddRes.success) {
+    assert(tbOddRes.normalizedTransaction?.provider === 'TELEBIRR', 'Provider matches detected provider (never falls through to AWASH)');
+  } else {
+    assert(tbOddRes.status === 'UNPARSED', 'Unmatched Telebirr message safely rejected without cross-provider fallback');
+  }
+
+  // Unknown provider message
+  const unknownMsg: CandidateMessage = {
+    id: 'unknown_prov_1',
+    source: 'NOTIFICATION',
+    rawText: 'Transferred ETB 100 to someone from RandomBank',
+    timestamp: new Date().toISOString(),
+  };
+  const unkRes = await pipeline.processCandidate(unknownMsg);
+  assert(!unkRes.success && unkRes.status === 'UNPARSED', 'Unknown provider produces zero transactions');
+
+  // -------------------------------------------------------------------------
+  // TEST 8: USER CATEGORY & REMARK PERSISTENCE ACROSS DUPLICATE INGESTION
+  // -------------------------------------------------------------------------
+  console.log('\n--- 8. Category & Remark Persistence Across Duplicate Ingestion ---');
+
+  const txNotif: CandidateMessage = {
+    id: 'notif_cat_test',
+    source: 'NOTIFICATION',
+    rawText: 'You have paid ETB 50.00 to Tomoca Coffee. Transaction number: CR554433. Balance ETB 900.00.',
+    packageName: 'cn.tydic.ethiopay',
+    timestamp: new Date().toISOString(),
+  };
+  const txRes = await pipeline.processCandidate(txNotif);
+  assert(txRes.success === true, 'New transaction ingested for user customization test');
+
+  const createdTx = mockDb.transactions.find((t) => t.transactionNumber === 'CR554433');
+  assert(!!createdTx, 'Transaction found in ledger');
+
+  // User sets Category and Remark
+  await mockDb.updateTransaction(createdTx!.id, {
+    categoryId: 'cat_food',
+    notes: 'Coffee with colleagues at lunch',
+  });
+  assert(createdTx!.categoryId === 'cat_food', 'User assigned category preserved');
+  assert(createdTx!.notes === 'Coffee with colleagues at lunch', 'User remark preserved');
+
+  // Same notification arrives again as duplicate
+  const dupTxRes = await pipeline.processCandidate(txNotif);
+  assert(dupTxRes.isDuplicate === true, 'Duplicate notification detected');
+  assert(dupTxRes.status === 'DUPLICATE_SKIPPED', 'Duplicate skipped without modifying existing record');
+
+  // Verify that user's category and remark are completely intact!
+  const survivingTx = mockDb.transactions.find((t) => t.transactionNumber === 'CR554433');
+  assert(survivingTx!.categoryId === 'cat_food', 'User category survived duplicate ingestion intact');
+  assert(survivingTx!.notes === 'Coffee with colleagues at lunch', 'User remark survived duplicate ingestion intact');
 
   // -------------------------------------------------------------------------
   // FINAL SUMMARY

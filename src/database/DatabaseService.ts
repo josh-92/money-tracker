@@ -659,6 +659,40 @@ export class DatabaseService {
     );
   }
 
+  /**
+   * Updates user-owned metadata (Category, Notes/Remark, Merchant, Amount) while preserving original source audit trail.
+   */
+  public async updateTransaction(
+    id: string,
+    updates: Partial<Pick<Transaction, 'categoryId' | 'notes' | 'cleanMerchant' | 'merchantName' | 'amount' | 'accountId'>>
+  ): Promise<void> {
+    const db = await this.getDb();
+    const now = new Date().toISOString();
+    await db.runAsync(
+      `UPDATE transactions SET 
+        category_id = CASE WHEN ? IS NOT NULL THEN ? ELSE category_id END,
+        notes = CASE WHEN ? IS NOT NULL THEN ? ELSE notes END,
+        clean_merchant = CASE WHEN ? IS NOT NULL THEN ? ELSE clean_merchant END,
+        merchant_name = CASE WHEN ? IS NOT NULL THEN ? ELSE merchant_name END,
+        amount = CASE WHEN ? IS NOT NULL THEN ? ELSE amount END,
+        account_id = CASE WHEN ? IS NOT NULL THEN ? ELSE account_id END,
+        user_edited_at = ?,
+        updated_at = ?
+       WHERE id = ?;`,
+      [
+        updates.categoryId ?? null, updates.categoryId ?? null,
+        updates.notes ?? null, updates.notes ?? null,
+        updates.cleanMerchant ?? null, updates.cleanMerchant ?? null,
+        updates.merchantName ?? null, updates.merchantName ?? null,
+        updates.amount ?? null, updates.amount ?? null,
+        updates.accountId ?? null, updates.accountId ?? null,
+        now,
+        now,
+        id,
+      ]
+    );
+  }
+
   // --- 4-Tier Duplicate & Proximity Match Detection Engine ---
 
   public async findMatchingTransaction(

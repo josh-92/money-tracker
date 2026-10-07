@@ -19,6 +19,7 @@ import {
   Modal,
   Platform,
   AppState,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -33,13 +34,16 @@ import {
   Wallet,
   Plus,
   BellRing,
+  Tag,
+  FileText,
+  Check,
 } from 'lucide-react-native';
 import { spacing, layout, borderRadius } from '../theme/spacing';
 import { typography } from '../theme/typography';
 import { darkTheme, lightTheme, ColorTheme } from '../theme/colors';
 import { VaultCard } from '../components/VaultCard';
 import { ProviderLogo } from '../components/ProviderLogo';
-import { Transaction, Account } from '../types/database';
+import { Transaction, Account, Category } from '../types/database';
 import { dbService } from '../database/DatabaseService';
 import { useBalanceVisibility } from '../context/BalanceVisibilityContext';
 import { ingestionPipeline } from '../ingestion/IngestionPipeline';
@@ -59,8 +63,12 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
   const { formatAmount } = useBalanceVisibility();
   const [pendingTransactions, setPendingTransactions] = useState<Transaction[]>([]);
   const [userAccounts, setUserAccounts] = useState<Account[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [assigningTx, setAssigningTx] = useState<Transaction | null>(null);
+  const [categoryModalTx, setCategoryModalTx] = useState<Transaction | null>(null);
+  const [remarkModalTx, setRemarkModalTx] = useState<Transaction | null>(null);
+  const [remarkInput, setRemarkInput] = useState('');
   const [isPermissionGranted, setIsPermissionGranted] = useState(true);
 
   const loadData = async () => {
@@ -71,12 +79,14 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
         // Auto-check clipboard when viewing review inbox
         await clipboardSource.checkClipboard().catch(() => {});
       }
-      const [items, accounts] = await Promise.all([
+      const [items, accounts, cats] = await Promise.all([
         dbService.getTransactions({ status: 'PENDING_REVIEW', limit: 50 }),
         dbService.getAccounts(),
+        dbService.getCategories(),
       ]);
       setPendingTransactions(items);
       setUserAccounts(accounts);
+      setCategories(cats);
     } catch (err) {
       console.error('Error loading inbox data:', err);
     } finally {
@@ -142,6 +152,46 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
       setAssigningTx(null);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to assign account and confirm transaction.');
+    }
+  };
+
+  const handleSelectCategory = async (category: Category) => {
+    if (!categoryModalTx) return;
+    try {
+      await dbService.updateTransaction(categoryModalTx.id, { categoryId: category.id });
+      setPendingTransactions((prev) =>
+        prev.map((item) =>
+          item.id === categoryModalTx.id
+            ? {
+                ...item,
+                categoryId: category.id,
+                categoryName: category.name,
+                categoryColor: category.colorHex,
+              }
+            : item
+        )
+      );
+      setCategoryModalTx(null);
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to update category.');
+    }
+  };
+
+  const handleSaveRemark = async () => {
+    if (!remarkModalTx) return;
+    try {
+      const trimmed = remarkInput.trim() || null;
+      await dbService.updateTransaction(remarkModalTx.id, { notes: trimmed });
+      setPendingTransactions((prev) =>
+        prev.map((item) =>
+          item.id === remarkModalTx.id
+            ? { ...item, notes: trimmed }
+            : item
+        )
+      );
+      setRemarkModalTx(null);
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to update remark.');
     }
   };
 
@@ -328,6 +378,57 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
                   </Text>
                 </View>
 
+                {/* Category & Remark Quick Edit Badges */}
+                <View style={styles.metaBadgeRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.categoryBadge,
+                      {
+                        backgroundColor: (tx.categoryColor || theme.income) + '15',
+                        borderColor: (tx.categoryColor || theme.income) + '35',
+                      },
+                    ]}
+                    onPress={() => setCategoryModalTx(tx)}
+                    activeOpacity={0.7}
+                  >
+                    <Tag size={12} color={tx.categoryColor || theme.income} />
+                    <Text
+                      style={[styles.categoryBadgeText, { color: tx.categoryColor || theme.income }]}
+                      numberOfLines={1}
+                    >
+                      {tx.categoryName || 'Uncategorized'}
+                    </Text>
+                    <Edit3 size={10} color={tx.categoryColor || theme.income} style={{ marginLeft: 2 }} />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.remarkBadge,
+                      {
+                        backgroundColor: theme.surfaceHighlight,
+                        borderColor: theme.surfaceBorder,
+                      },
+                    ]}
+                    onPress={() => {
+                      setRemarkModalTx(tx);
+                      setRemarkInput(tx.notes || '');
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <FileText size={12} color={theme.textMuted} />
+                    <Text
+                      style={[
+                        styles.remarkBadgeText,
+                        { color: tx.notes ? theme.textPrimary : theme.textMuted },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {tx.notes ? tx.notes : 'Add Remark'}
+                    </Text>
+                    <Edit3 size={10} color={theme.textMuted} style={{ marginLeft: 2 }} />
+                  </TouchableOpacity>
+                </View>
+
                 {/* Raw Snippet Box */}
                 {tx.rawSourceMessage && (
                   <View
@@ -432,6 +533,127 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
             >
               <Text style={[styles.modalCancelBtnText, { color: theme.textSecondary }]}>Cancel</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Category Selection Modal */}
+      <Modal
+        visible={categoryModalTx !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCategoryModalTx(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.surface, borderColor: theme.surfaceBorder }]}>
+            <View style={styles.modalHeader}>
+              <View style={[styles.modalIconCircle, { backgroundColor: theme.incomeBackground }]}>
+                <Tag size={22} color={theme.income} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Assign Category</Text>
+                <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
+                  Select category for {categoryModalTx?.cleanMerchant || categoryModalTx?.merchantName || 'transaction'}
+                </Text>
+              </View>
+            </View>
+
+            <ScrollView style={styles.categoryList} showsVerticalScrollIndicator={false}>
+              {categories.map((cat) => {
+                const isSelected = categoryModalTx?.categoryId === cat.id;
+                return (
+                  <TouchableOpacity
+                    key={cat.id}
+                    style={[
+                      styles.categoryOption,
+                      {
+                        borderColor: isSelected ? theme.primary : theme.surfaceBorder,
+                        backgroundColor: isSelected ? theme.primaryGlow : theme.surfaceHighlight,
+                      },
+                    ]}
+                    onPress={() => handleSelectCategory(cat)}
+                  >
+                    <View
+                      style={[
+                        styles.categoryOptionCircle,
+                        { backgroundColor: cat.colorHex + '25' },
+                      ]}
+                    >
+                      <Tag size={16} color={cat.colorHex} />
+                    </View>
+                    <Text style={[styles.categoryOptionName, { color: theme.textPrimary, flex: 1 }]}>
+                      {cat.name}
+                    </Text>
+                    {isSelected && <Check size={18} color={theme.primary} />}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={[styles.modalCancelBtn, { borderColor: theme.surfaceBorder }]}
+              onPress={() => setCategoryModalTx(null)}
+            >
+              <Text style={[styles.modalCancelBtnText, { color: theme.textSecondary }]}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Remark / Notes Modal */}
+      <Modal
+        visible={remarkModalTx !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRemarkModalTx(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.surface, borderColor: theme.surfaceBorder }]}>
+            <View style={styles.modalHeader}>
+              <View style={[styles.modalIconCircle, { backgroundColor: theme.primaryGlow }]}>
+                <FileText size={22} color={theme.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Transaction Remark</Text>
+                <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
+                  Add personal notes, counterparty reference, or purpose:
+                </Text>
+              </View>
+            </View>
+
+            <TextInput
+              style={[
+                styles.remarkInput,
+                {
+                  backgroundColor: theme.surfaceHighlight,
+                  borderColor: theme.surfaceBorder,
+                  color: theme.textPrimary,
+                },
+              ]}
+              placeholder="e.g. Lunch with Abebe, Electricity bill, Salary transfer"
+              placeholderTextColor={theme.textMuted}
+              value={remarkInput}
+              onChangeText={setRemarkInput}
+              multiline
+              numberOfLines={3}
+              maxLength={200}
+            />
+
+            <View style={styles.modalActionButtonsRow}>
+              <TouchableOpacity
+                style={[styles.modalCancelBtn, { borderColor: theme.surfaceBorder, flex: 1 }]}
+                onPress={() => setRemarkModalTx(null)}
+              >
+                <Text style={[styles.modalCancelBtnText, { color: theme.textSecondary }]}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalSaveBtn, { backgroundColor: theme.primary, flex: 1 }]}
+                onPress={handleSaveRemark}
+              >
+                <Text style={styles.modalSaveBtnText}>Save Remark</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -725,6 +947,88 @@ const styles = StyleSheet.create({
   },
   enableAccessButtonText: {
     fontSize: typography.fontSize.xs,
+    fontWeight: typography.fontWeight.bold,
+  },
+  metaBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginVertical: spacing.xs,
+  },
+  categoryBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: borderRadius.pill,
+    borderWidth: 1,
+    gap: 4,
+    maxWidth: '48%',
+  },
+  categoryBadgeText: {
+    fontSize: 11,
+    fontWeight: typography.fontWeight.medium,
+  },
+  remarkBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: borderRadius.pill,
+    borderWidth: 1,
+    gap: 4,
+    maxWidth: '48%',
+  },
+  remarkBadgeText: {
+    fontSize: 11,
+    fontWeight: typography.fontWeight.medium,
+  },
+  categoryList: {
+    maxHeight: 280,
+    marginVertical: spacing.sm,
+  },
+  categoryOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    marginBottom: 8,
+    gap: 10,
+  },
+  categoryOptionCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  categoryOptionName: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+  },
+  remarkInput: {
+    borderWidth: 1,
+    borderRadius: borderRadius.md,
+    padding: spacing.md,
+    fontSize: typography.fontSize.sm,
+    minHeight: 80,
+    textAlignVertical: 'top',
+    marginVertical: spacing.md,
+  },
+  modalActionButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  modalSaveBtn: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderRadius: borderRadius.md,
+  },
+  modalSaveBtnText: {
+    color: '#FFFFFF',
+    fontSize: typography.fontSize.sm,
     fontWeight: typography.fontWeight.bold,
   },
 });

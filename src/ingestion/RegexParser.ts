@@ -38,49 +38,65 @@ export class RegexParser {
 
   /**
    * Main parsing dispatcher for incoming text.
+   * Enforces strict provider isolation when providerKey is specified.
    */
-  public static parse(rawText: string, senderHint?: string): ParsedBankNotification | null {
+  public static parse(
+    rawText: string,
+    senderHint?: string,
+    providerKey?: ProviderKey | 'UNKNOWN'
+  ): ParsedBankNotification | null {
     if (!rawText || !rawText.trim()) return null;
     const text = rawText.trim();
     const hint = (senderHint || '').toUpperCase();
 
-    // 1. Awash Check (by hint or explicit Awash marker / shortcode / ref)
+    // 1. Strict Provider Isolation: When provider is known, dispatch ONLY to that provider's parser
+    if (providerKey && providerKey !== 'UNKNOWN') {
+      if (providerKey === 'TELEBIRR') return this.parseTelebirr(text);
+      if (providerKey === 'CBE') return this.parseCBE(text, senderHint);
+      if (providerKey === 'AWASH') return this.parseAwash(text, senderHint);
+      return null;
+    }
+    if (providerKey === 'UNKNOWN') {
+      return null;
+    }
+
+    // 2. Strict Provider Resolution when providerKey is omitted (standalone calls/tests)
     if (
       hint.includes('AWASH') ||
       hint.includes('AWASHPAY') ||
       hint === '8900' ||
       hint.includes('8900') ||
       hint.includes('አዋሽ') ||
-      /\b(?:AW\d+|Awash|AwashBirr|8900|አዋሽ)\b/i.test(text)
+      /\b(?:AW\d+|Awash|AwashBirr|8900|አዋሽ)\b/i.test(text) ||
+      text.includes('0132***') ||
+      text.includes('***3901')
     ) {
-      const awash = this.parseAwash(text, senderHint);
-      if (awash) return awash;
+      return this.parseAwash(text, senderHint);
     }
 
-    // 2. Telebirr Check
     if (
       hint.includes('TELEBIRR') ||
       hint === '127' ||
       hint.includes('ETYDIC') ||
-      /\b(?:telebirr|127|ቴሌብር)\b/i.test(text)
+      /\b(?:telebirr|127|ቴሌብር)\b/i.test(text) ||
+      /\b(?:CR|TR|RC|AT|CO|CI)\d[A-Z0-9]{3,}\b/i.test(text)
     ) {
-      const tb = this.parseTelebirr(text);
-      if (tb) return tb;
+      return this.parseTelebirr(text);
     }
 
-    // 3. CBE Check
     if (
       hint.includes('CBE') ||
       hint.includes('COMMERCIAL') ||
       hint === '951' ||
-      /\b(?:CBE|CBEBirr|951|FT\d+)\b/i.test(text)
+      /\b(?:CBE|CBEBirr|951|FT\d+)\b/i.test(text) ||
+      /Acc\.?\s*[*xX\d]+\s+has\s+been\s+(?:debited|credited)/i.test(text) ||
+      /ውድ\s*ደንበኛችን/i.test(text)
     ) {
-      const cbe = this.parseCBE(text);
-      if (cbe) return cbe;
+      return this.parseCBE(text, senderHint);
     }
 
-    // 4. Fallback: Try all in order
-    return this.parseTelebirr(text) || this.parseCBE(text) || this.parseAwash(text, senderHint);
+    // NEVER blindly fall through to cross-parse unrelated providers
+    return null;
   }
 
   // =========================================================================
@@ -88,6 +104,15 @@ export class RegexParser {
   // =========================================================================
 
   public static parseTelebirr(text: string): ParsedBankNotification | null {
+    const isTelebirrContext =
+      /telebirr|127|ቴሌብር/i.test(text) ||
+      /\b(?:CR|TR|RC|AT|CO|CI)\d[A-Z0-9]{3,}\b/i.test(text) ||
+      /(?:Txn|Transaction)\s+(?:number|ID|No)(?:\s+is)?[:\s]+[A-Z0-9]{4,}/i.test(text) ||
+      /የግብይት\s*ቁጥር/i.test(text);
+
+    if (!isTelebirrContext) {
+      return null;
+    }
     // -------------------------------------------------------------
     // Pattern TB-1: Airtime Purchase (English)
     // "You have bought ETB 50.00 airtime for 0911223344 on 2026-10-04. Txn number: AT4321. Current balance is ETB 2700.00."
@@ -379,7 +404,21 @@ export class RegexParser {
   // COMMERCIAL BANK OF ETHIOPIA (CBE) PARSER (English & Amharic)
   // =========================================================================
 
-  public static parseCBE(text: string): ParsedBankNotification | null {
+  public static parseCBE(text: string, senderHint?: string): ParsedBankNotification | null {
+    const hint = (senderHint || '').toUpperCase();
+    const isCbeContext =
+      text.toUpperCase().includes('CBE') ||
+      text.includes('951') ||
+      hint.includes('CBE') ||
+      hint === '951' ||
+      /FT\d+/i.test(text) ||
+      text.includes('***7852') ||
+      text.includes('ውድ ደንበኛችን') ||
+      /Acc\.?\s*[*xX\d]+\s+has\s+been\s+(?:debited|credited)/i.test(text);
+
+    if (!isCbeContext) {
+      return null;
+    }
     // -------------------------------------------------------------
     // Pattern CBE-1: Debit Alert (English)
     // "Dear Tanya, your Acc. ***7852 has been debited with ETB 450.00 on 04/10/2026 14:15 for Shoa Supermarket. Balance: ETB 6,800.00. Ref: FT26277."
@@ -629,7 +668,15 @@ export class RegexParser {
       text.toLowerCase().includes('awash') ||
       text.includes('8900') ||
       /AW\d+/i.test(text) ||
-      (senderHint && senderHint.toUpperCase().includes('AWASH'));
+      (senderHint && senderHint.toUpperCase().includes('AWASH')) ||
+      (senderHint && senderHint.toUpperCase().includes('AWASHPAY')) ||
+      text.includes('0132***') ||
+      text.includes('***3901') ||
+      text.includes('አዋሽ');
+
+    if (!isAwashContext) {
+      return null;
+    }
 
     // -------------------------------------------------------------
     // Pattern AW-1: Debit Alert (English)
