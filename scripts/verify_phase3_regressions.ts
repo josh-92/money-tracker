@@ -9,6 +9,7 @@
  */
 
 import { IngestionPipeline } from '../src/ingestion/IngestionPipeline';
+import { ClipboardSource } from '../src/ingestion/sources/ClipboardSource';
 import { CandidateMessage } from '../src/ingestion/types';
 import { Account, Transaction } from '../src/types/database';
 
@@ -66,18 +67,52 @@ class MockDatabaseService {
     }
   }
 
-  public async findMatchingTransaction(query: any): Promise<{ matchFound: boolean; matchReason?: string }> {
-    const match = this.transactions.find((tx) => {
-      if (tx.isDeleted) return false;
-      if (query.transactionNumber && tx.transactionNumber === query.transactionNumber) return true;
-      if (query.refNumber && tx.refNumber === query.refNumber) return true;
-      return false;
-    });
+  public async findMatchingTransaction(query: any): Promise<{ matchFound: boolean; matchReason?: string; transaction?: Transaction | null }> {
+    const candidateProvider = query.provider && query.provider !== 'UNKNOWN' ? query.provider : null;
+    const refToSearch = query.refNumber || query.transactionNumber;
 
-    if (match) {
-      return { matchFound: true, matchReason: 'Reference match found' };
+    // Tier 1: Exact reference match
+    if (refToSearch) {
+      const match = this.transactions.find((tx) => {
+        if (tx.isDeleted) return false;
+        const matchesRef = tx.transactionNumber === refToSearch || tx.refNumber === refToSearch;
+        if (!matchesRef) return false;
+        if (candidateProvider && tx.providerKey && candidateProvider !== tx.providerKey) return false;
+        return true;
+      });
+      if (match) {
+        return { matchFound: true, transaction: match, matchReason: `Exact reference matched (${refToSearch})` };
+      }
     }
-    return { matchFound: false };
+
+    // Tier 4: Proximity Amount Window
+    if (query.amount > 0 && query.timestamp) {
+      const targetTime = new Date(query.timestamp).getTime();
+      const toleranceMs = (query.toleranceMinutes ?? 120) * 60 * 1000;
+      const match = this.transactions.find((tx) => {
+        if (tx.isDeleted) return false;
+        if (tx.amount !== query.amount) return false;
+        // Provider isolation
+        if (candidateProvider && tx.providerKey && candidateProvider !== tx.providerKey) return false;
+        // Direction check
+        if (query.type && tx.type) {
+          if (query.type === 'INCOME' && tx.type !== 'INCOME') return false;
+          if ((query.type === 'EXPENSE' || query.type === 'TRANSFER') && tx.type === 'INCOME') return false;
+        }
+        // Reference conflict check
+        const existingRef = tx.refNumber || tx.transactionNumber;
+        if (refToSearch && existingRef && refToSearch !== existingRef) return false;
+        // Time window
+        const txTime = new Date(tx.timestamp).getTime();
+        return Math.abs(txTime - targetTime) <= toleranceMs;
+      });
+      if (match) {
+        const providerLabel = candidateProvider || match.providerKey || 'ledger';
+        return { matchFound: true, transaction: match, matchReason: `Proximity match: exact amount (${query.amount} ETB) within ±120m on ${providerLabel}.` };
+      }
+    }
+
+    return { matchFound: false, transaction: null };
   }
 
   public async createTransaction(txData: any): Promise<Transaction> {
@@ -286,7 +321,7 @@ async function runTests() {
     timestamp: new Date().toISOString(),
   };
   const errRes = await pipeline.processCandidate(errorLogMsg);
-  assert(!errRes.success && (errRes.status === 'NOT_FINANCIAL' || errRes.status === 'UNPARSED'), 'Developer error log copied to clipboard is strictly rejected');
+  assert(!errRes.success && errRes.status === 'UNPARSED', 'Developer error log copied to clipboard is strictly rejected');
 
   // 6.2: Non-financial app notification (Telegram)
   const telegramMsg: CandidateMessage = {
@@ -387,6 +422,85 @@ async function runTests() {
   const survivingTx = mockDb.transactions.find((t) => t.transactionNumber === 'CR554433');
   assert(survivingTx!.categoryId === 'cat_food', 'User category survived duplicate ingestion intact');
   assert(survivingTx!.notes === 'Coffee with colleagues at lunch', 'User remark survived duplicate ingestion intact');
+
+  // -------------------------------------------------------------------------
+  // TEST 9: CROSS-PROVIDER SAME AMOUNT INGESTION COLLISION PREVENTION
+  // -------------------------------------------------------------------------
+  console.log('\n--- 9. Cross-Provider Same Amount Ingestion Collision Prevention ---');
+
+  // Step 1: Telebirr outgoing transfer of ETB 20 arrives
+  const tb20Notif: CandidateMessage = {
+    id: 'notif_tb_20',
+    source: 'NOTIFICATION',
+    rawText: 'You have transferred ETB 20.00 to Dawit Tsige (0911000000). Txn number: TR1122. Current balance is ETB 1500.00.',
+    packageName: 'cn.tydic.ethiopay',
+    timestamp: '2026-10-07T14:00:00.000Z',
+  };
+  const tb20Res = await pipeline.processCandidate(tb20Notif);
+  assert(tb20Res.success && tb20Res.status === 'PENDING_REVIEW', 'Telebirr 20 ETB transaction ingested as PENDING_REVIEW');
+
+  // Step 2: Real AwashBirr Pro transfer of ETB 20 arrives 1 minute later
+  const awash20Notif: CandidateMessage = {
+    id: 'notif_awash_20',
+    source: 'NOTIFICATION',
+    rawText: 'Awash Bank: Dear Customer , You have transferred to other bank ETB 20.00 to Abebe on 2026-10-07 14:01:00. Balance: ETB 1,500.00. Ref: AW5566.',
+    packageName: 'com.sc.awashpay',
+    timestamp: '2026-10-07T14:01:00.000Z',
+  };
+  const awash20Res = await pipeline.processCandidate(awash20Notif);
+  assert(
+    awash20Res.success && awash20Res.status === 'PENDING_REVIEW' && !awash20Res.isDuplicate,
+    'CRITICAL: Awash 20 ETB is NOT falsely rejected as duplicate of nearby Telebirr 20 ETB'
+  );
+
+  // -------------------------------------------------------------------------
+  // TEST 10: CLIPBOARD CONCURRENCY & SERIALIZATION
+  // -------------------------------------------------------------------------
+  console.log('\n--- 10. Clipboard Concurrency & Serialization ---');
+
+  const clipboardMock = require('./mocks/expo-clipboard');
+  clipboardMock.__setClipboardText('You have transferred ETB 35.00 to Helen (0911223344). Txn number: TR7788. Current balance is ETB 1465.00.');
+
+  const clipSource = new ClipboardSource();
+  let invocationCount = 0;
+  clipSource.onMessage(async (msg) => {
+    invocationCount++;
+    // Simulate pipeline latency
+    await new Promise((r) => setTimeout(r, 50));
+    return await pipeline.processCandidate(msg);
+  });
+
+  // Concurrently trigger 4 clipboard checks simultaneously (as happens across AppState, focus, refresh)
+  await Promise.all([
+    clipSource.checkClipboard(),
+    clipSource.checkClipboard(),
+    clipSource.checkClipboard(),
+    clipSource.checkClipboard(),
+  ]);
+
+  assert(
+    invocationCount === 1,
+    'Concurrency test: 4 concurrent checkClipboard calls result in exactly 1 underlying processing invocation'
+  );
+
+  // Subsequent check with the exact same content should skip without re-invoking
+  const repeatCheck = await clipSource.checkClipboard();
+  assert(repeatCheck === null, 'Identical clipboard text skipped on repeat check');
+  assert(invocationCount === 1, 'Invocation count remains 1 after identical repeat check');
+
+  // -------------------------------------------------------------------------
+  // TEST 11: RANDOM / INVALID CLIPBOARD CONTENT DISCARD
+  // -------------------------------------------------------------------------
+  console.log('\n--- 11. Random / Invalid Clipboard Discard ---');
+
+  clipboardMock.__setClipboardText('Random clipboard text: hello world stack trace error at line 45');
+  const randomCheck = await clipSource.checkClipboard();
+  assert(randomCheck === null, 'Random non-financial clipboard text produces null candidate');
+
+  // Verify that an invalid clipboard check does NOT block future valid content
+  clipboardMock.__setClipboardText('You have received ETB 80.00 from Samuel. Txn number: RC8899. Your current balance is ETB 1545.00.');
+  const validAfterRandom = await clipSource.checkClipboard();
+  assert(validAfterRandom !== null, 'Valid financial clipboard text immediately processed after invalid text');
 
   // -------------------------------------------------------------------------
   // FINAL SUMMARY

@@ -130,7 +130,7 @@ export class IngestionPipeline {
         `[PIPELINE:CANDIDATE] Candidate parsed: provider=${normalized.provider}, type=${normalized.type}, amount=${normalized.amount}, ref=${normalized.refNumber ?? 'none'}, txn=${normalized.transactionNumber ?? 'none'}, matchedAccount=${matchedAccountId ?? 'none'}`
       );
 
-      // Step 4: 4-Tier Deduplication Check
+      // Step 4: 4-Tier Deduplication Check with Strict Provider Isolation
       const matchResult = await db.findMatchingTransaction({
         amount: normalized.amount,
         timestamp: normalized.timestamp,
@@ -138,6 +138,9 @@ export class IngestionPipeline {
         transactionNumber: normalized.transactionNumber,
         accountId: matchedAccountId,
         cleanMerchant: normalized.cleanMerchant,
+        provider: normalized.provider,
+        type: normalized.type,
+        destinationAccountId: null,
         toleranceMinutes: 120,
       });
 
@@ -167,6 +170,7 @@ export class IngestionPipeline {
       const newTx = await db.createTransaction({
         accountId: matchedAccountId,
         destinationAccountId: null,
+        providerKey: normalized.provider === 'UNKNOWN' ? null : normalized.provider,
         categoryId: null, // User can assign or AI can auto-categorize in Phase 4
         amount: normalized.amount,
         type: normalized.type,

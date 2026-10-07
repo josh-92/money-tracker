@@ -71,16 +71,29 @@ export class ClipboardSource implements TransactionSource {
           console.warn('[CLIPBOARD:JS] Error in checkClipboard timeout:', err);
         });
       }, 250);
-    } else if (nextAppState !== 'active') {
-      // Reset cache when leaving app so user can re-copy or copy new text
-      this.resetCache();
     }
   };
 
+  private activeCheckPromise: Promise<CandidateMessage | null> | null = null;
+
   /**
    * Reads clipboard content and returns candidate message if it passes banking filter.
+   * Concurrency-safe: Serializes overlapping checks so only one read/pipeline operation runs at once.
    */
   public async checkClipboard(): Promise<CandidateMessage | null> {
+    if (this.activeCheckPromise) {
+      console.log('[CLIPBOARD:JS] checkClipboard already in progress; reusing active promise.');
+      return this.activeCheckPromise;
+    }
+
+    this.activeCheckPromise = this.performCheckClipboard().finally(() => {
+      this.activeCheckPromise = null;
+    });
+
+    return this.activeCheckPromise;
+  }
+
+  private async performCheckClipboard(): Promise<CandidateMessage | null> {
     try {
       console.log(`[CLIPBOARD:JS] checkClipboard invoked (currentState=${AppState.currentState})`);
 
@@ -115,7 +128,7 @@ export class ClipboardSource implements TransactionSource {
       const trimmed = text.trim();
       console.log(`[CLIPBOARD:JS] Read clipboard text: length=${trimmed.length}, preview="${trimmed.substring(0, 40)}..."`);
 
-      // Don't re-process identical clipboard content in the same foreground session
+      // Don't re-process identical clipboard content that was already processed in this session
       if (trimmed === this.lastProcessedContent) {
         console.log('[CLIPBOARD:JS] Identical clipboard content already processed in this session.');
         return null;
@@ -140,7 +153,7 @@ export class ClipboardSource implements TransactionSource {
       if (this.messageHandler) {
         console.log(`[CLIPBOARD:JS] Forwarding clipboard candidate (${candidate.id}) to IngestionPipeline`);
         const result = await this.messageHandler(candidate);
-        // Only mark as processed if pipeline accepted and parsed it
+        // Only mark as processed if pipeline accepted and evaluated it (including duplicate detection)
         if (result && result.success && result.status !== 'UNPARSED') {
           this.lastProcessedContent = trimmed;
         }

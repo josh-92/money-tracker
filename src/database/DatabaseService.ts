@@ -380,6 +380,17 @@ export class DatabaseService {
     let query = `
       SELECT t.*, 
              COALESCE(a.name, 'Unassigned Account') as account_name, 
+             a.provider_key as account_provider_key,
+             COALESCE(
+               t.provider_key,
+               a.provider_key,
+               CASE 
+                 WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+                 WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+                 WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+                 ELSE NULL
+               END
+             ) as effective_provider,
              c.name as category_name, 
              c.color_hex as category_color, 
              c.icon_name as category_icon
@@ -419,6 +430,7 @@ export class DatabaseService {
       id: r.id,
       accountId: r.account_id,
       destinationAccountId: r.destination_account_id,
+      providerKey: (r.effective_provider || r.provider_key || r.account_provider_key || null) as any,
       categoryId: r.category_id,
       amount: r.amount,
       type: r.type,
@@ -477,6 +489,17 @@ export class DatabaseService {
     const row = await db.getFirstAsync<any>(
       `SELECT t.*, 
               COALESCE(a.name, 'Unassigned Account') as account_name, 
+              a.provider_key as account_provider_key,
+              COALESCE(
+                t.provider_key,
+                a.provider_key,
+                CASE 
+                  WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+                  WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+                  WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+                  ELSE NULL
+                END
+              ) as effective_provider,
               c.name as category_name, 
               c.color_hex as category_color, 
               c.icon_name as category_icon
@@ -491,6 +514,7 @@ export class DatabaseService {
       id: row.id,
       accountId: row.account_id,
       destinationAccountId: row.destination_account_id,
+      providerKey: (row.effective_provider || row.provider_key || row.account_provider_key || null) as any,
       categoryId: row.category_id,
       amount: row.amount,
       type: row.type,
@@ -554,17 +578,18 @@ export class DatabaseService {
 
     await db.runAsync(
       `INSERT INTO transactions (
-        id, account_id, destination_account_id, category_id, amount, type,
+        id, account_id, destination_account_id, provider_key, category_id, amount, type,
         merchant_name, clean_merchant, notes, status, timestamp, is_deleted,
         source, raw_source_message, source_timestamp, ref_number, transaction_number,
         sender, recipient, balance_after_transaction, parser_version, template_id,
         confidence_score, ai_operation_used, original_amount, original_merchant_name,
         original_category_id, user_edited_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
       [
         id,
         tx.accountId,
         tx.destinationAccountId || null,
+        tx.providerKey || null,
         tx.categoryId || null,
         tx.amount,
         tx.type,
@@ -717,10 +742,14 @@ export class DatabaseService {
     const minTime = new Date(targetDate - targetTolerance * 60 * 1000).toISOString();
     const maxTime = new Date(targetDate + targetTolerance * 60 * 1000).toISOString();
 
+    const candidateProvider =
+      query.provider && query.provider !== 'UNKNOWN' ? query.provider : null;
+
     const mapRowToTx = (row: any): Transaction => ({
       id: row.id,
       accountId: row.account_id,
       destinationAccountId: row.destination_account_id,
+      providerKey: (row.effective_provider || row.provider_key || row.account_provider_key || null) as any,
       categoryId: row.category_id,
       amount: row.amount,
       type: row.type,
@@ -771,28 +800,70 @@ export class DatabaseService {
     const refToSearch = candidateRef || candidateTxn;
 
     console.log(
-      `[DUPLICATE:CHECK] candidate ref=${refToSearch ?? 'none'}, amount=${query.amount}, accountId=${query.accountId ?? 'none'}, cleanMerchant=${query.cleanMerchant ?? 'none'}`
+      `[DUPLICATE:CHECK] candidate ref=${refToSearch ?? 'none'}, provider=${candidateProvider ?? 'unknown'}, amount=${query.amount}, type=${query.type ?? 'none'}, accountId=${query.accountId ?? 'none'}`
     );
 
     if (refToSearch) {
-      const row = await db.getFirstAsync<any>(
-        `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
-         FROM transactions t
-         LEFT JOIN accounts a ON t.account_id = a.id
-         WHERE (t.ref_number = ? OR t.transaction_number = ?)
-           AND t.is_deleted = 0
-         LIMIT 1;`,
-        [refToSearch, refToSearch]
-      );
+      let tier1Sql = `
+        SELECT t.*, 
+               COALESCE(a.name, 'Unassigned Account') as account_name,
+               a.provider_key as account_provider_key,
+               COALESCE(
+                 t.provider_key,
+                 a.provider_key,
+                 CASE 
+                   WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+                   WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+                   WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+                   ELSE NULL
+                 END
+               ) as effective_provider
+        FROM transactions t
+        LEFT JOIN accounts a ON t.account_id = a.id
+        WHERE (t.ref_number = ? OR t.transaction_number = ?)
+          AND t.is_deleted = 0
+      `;
+      const tier1Params: any[] = [refToSearch, refToSearch];
+
+      // If candidate provider is known, enforce provider isolation so different providers never collide on reference
+      if (candidateProvider) {
+        tier1Sql += ` AND (
+          COALESCE(
+            t.provider_key,
+            a.provider_key,
+            CASE 
+              WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+              WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+              WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+              ELSE NULL
+            END
+          ) = ? OR COALESCE(
+            t.provider_key,
+            a.provider_key,
+            CASE 
+              WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+              WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+              WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+              ELSE NULL
+            END
+          ) IS NULL
+        )`;
+        tier1Params.push(candidateProvider);
+      }
+
+      tier1Sql += ' LIMIT 1;';
+      const row = await db.getFirstAsync<any>(tier1Sql, tier1Params);
 
       if (row) {
-        console.log(`[DUPLICATE:MATCH] Matched existing tx id=${row.id}, ref=${refToSearch}`);
-        return {
-          matchFound: true,
-          transaction: mapRowToTx(row),
-          confidence: 'EXACT_REFERENCE',
-          matchReason: `Exact reference matched provider confirmation (${refToSearch}).`,
-        };
+        if (!candidateProvider || !row.effective_provider || candidateProvider === row.effective_provider) {
+          console.log(`[DUPLICATE:MATCH] Tier 1 exact ref matched tx id=${row.id}, ref=${refToSearch}, provider=${row.effective_provider || candidateProvider}`);
+          return {
+            matchFound: true,
+            transaction: mapRowToTx(row),
+            confidence: 'EXACT_REFERENCE',
+            matchReason: `Exact reference matched ${candidateProvider || 'provider'} confirmation (${refToSearch}).`,
+          };
+        }
       }
     }
 
@@ -801,7 +872,10 @@ export class DatabaseService {
     // ----------------------------------------------------
     if (query.accountId && refToSearch) {
       const row = await db.getFirstAsync<any>(
-        `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
+        `SELECT t.*, 
+                COALESCE(a.name, 'Unassigned Account') as account_name,
+                a.provider_key as account_provider_key,
+                COALESCE(t.provider_key, a.provider_key) as effective_provider
          FROM transactions t
          JOIN accounts a ON t.account_id = a.id
          WHERE t.account_id = ?
@@ -812,72 +886,217 @@ export class DatabaseService {
       );
 
       if (row) {
-        console.log(`[DUPLICATE:MATCH] Tier 2 matched existing tx id=${row.id}, account=${row.account_name}, ref=${refToSearch}`);
-        return {
-          matchFound: true,
-          transaction: mapRowToTx(row),
-          confidence: 'EXACT_REFERENCE',
-          matchReason: `Account ${row.account_name} reference matched (${refToSearch}).`,
-        };
+        if (!candidateProvider || !row.effective_provider || candidateProvider === row.effective_provider) {
+          console.log(`[DUPLICATE:MATCH] Tier 2 matched existing tx id=${row.id}, account=${row.account_name}, ref=${refToSearch}`);
+          return {
+            matchFound: true,
+            transaction: mapRowToTx(row),
+            confidence: 'EXACT_REFERENCE',
+            matchReason: `Account ${row.account_name} reference matched (${refToSearch}).`,
+          };
+        }
       }
     }
 
     // ----------------------------------------------------
-    // Tier 3: Clean Merchant + Account + Same Date + Amount Match
+    // Tier 3: Clean Merchant + Account/Provider + Same Date + Amount Match
     // ----------------------------------------------------
-    if (query.cleanMerchant && query.accountId && query.amount > 0) {
+    if (query.cleanMerchant && query.amount > 0 && query.timestamp) {
       const dayStart = query.timestamp.substring(0, 10) + 'T00:00:00.000Z';
       const dayEnd = query.timestamp.substring(0, 10) + 'T23:59:59.999Z';
 
-      const row = await db.getFirstAsync<any>(
-        `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
-         FROM transactions t
-         JOIN accounts a ON t.account_id = a.id
-         WHERE t.account_id = ?
-           AND t.amount = ?
-           AND LOWER(t.clean_merchant) = LOWER(?)
-           AND t.timestamp BETWEEN ? AND ?
-           AND (t.ref_number IS NULL OR ? IS NULL)
-           AND (t.transaction_number IS NULL OR ? IS NULL)
-           AND t.is_deleted = 0
-         LIMIT 1;`,
-        [query.accountId, query.amount, query.cleanMerchant.trim(), dayStart, dayEnd, refToSearch ?? null, refToSearch ?? null]
-      );
+      let querySql = `
+        SELECT t.*, 
+               COALESCE(a.name, 'Unassigned Account') as account_name,
+               a.provider_key as account_provider_key,
+               COALESCE(
+                 t.provider_key,
+                 a.provider_key,
+                 CASE 
+                   WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+                   WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+                   WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+                   ELSE NULL
+                 END
+               ) as effective_provider
+        FROM transactions t
+        LEFT JOIN accounts a ON t.account_id = a.id
+        WHERE t.amount = ?
+          AND LOWER(t.clean_merchant) = LOWER(?)
+          AND t.timestamp BETWEEN ? AND ?
+          AND t.is_deleted = 0
+      `;
+      const params: any[] = [query.amount, query.cleanMerchant.trim(), dayStart, dayEnd];
 
-      if (row) {
+      if (query.accountId) {
+        querySql += ' AND t.account_id = ?';
+        params.push(query.accountId);
+      } else if (candidateProvider) {
+        querySql += ` AND (
+          COALESCE(
+            t.provider_key,
+            a.provider_key,
+            CASE 
+              WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+              WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+              WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+              ELSE NULL
+            END
+          ) = ? OR COALESCE(
+            t.provider_key,
+            a.provider_key,
+            CASE 
+              WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+              WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+              WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+              ELSE NULL
+            END
+          ) IS NULL
+        )`;
+        params.push(candidateProvider);
+      }
+
+      if (query.type) {
+        if (query.type === 'INCOME') {
+          querySql += " AND t.type = 'INCOME'";
+        } else if (query.type === 'EXPENSE' || query.type === 'TRANSFER') {
+          querySql += " AND t.type IN ('EXPENSE', 'TRANSFER')";
+        }
+      }
+
+      querySql += ' LIMIT 5;';
+      const rows = await db.getAllAsync<any>(querySql, params);
+
+      for (const row of rows) {
+        if (candidateProvider && row.effective_provider && candidateProvider !== row.effective_provider) {
+          continue;
+        }
+
+        const existingRef = (row.ref_number || row.transaction_number || '').trim();
+        const existingRefValid = RegexParser.isValidReference(existingRef);
+        const candidateRefValid = !!refToSearch && RegexParser.isValidReference(refToSearch);
+
+        // If both transactions have valid references and they differ, they are distinct transactions
+        if (candidateRefValid && existingRefValid && refToSearch !== existingRef) {
+          continue;
+        }
+
         return {
           matchFound: true,
           transaction: mapRowToTx(row),
           confidence: 'HIGH_METADATA',
-          matchReason: `Same merchant (${query.cleanMerchant}), account, and amount matched on ${query.timestamp.substring(0, 10)}.`,
+          matchReason: `Same merchant (${query.cleanMerchant}), ${row.account_name}, and amount matched on ${query.timestamp.substring(0, 10)}.`,
         };
       }
     }
 
     // ----------------------------------------------------
-    // Tier 4: Amount + Timestamp Proximity Window (default ±2h)
+    // Tier 4: Amount + Timestamp Proximity Window (default ±120m)
     // ----------------------------------------------------
     if (query.amount > 0 && query.timestamp) {
-      const row = await db.getFirstAsync<any>(
-        `SELECT t.*, COALESCE(a.name, 'Unassigned Account') as account_name
-         FROM transactions t
-         LEFT JOIN accounts a ON t.account_id = a.id
-         WHERE t.amount = ?
-           AND t.timestamp BETWEEN ? AND ?
-           AND (t.ref_number IS NULL OR ? IS NULL)
-           AND (t.transaction_number IS NULL OR ? IS NULL)
-           AND t.is_deleted = 0
-         ORDER BY ABS(strftime('%s', t.timestamp) - strftime('%s', ?)) ASC
-         LIMIT 1;`,
-        [query.amount, minTime, maxTime, refToSearch ?? null, refToSearch ?? null, query.timestamp]
-      );
+      let querySql = `
+        SELECT t.*, 
+               COALESCE(a.name, 'Unassigned Account') as account_name,
+               a.provider_key as account_provider_key,
+               COALESCE(
+                 t.provider_key,
+                 a.provider_key,
+                 CASE 
+                   WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+                   WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+                   WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+                   ELSE NULL
+                 END
+               ) as effective_provider
+        FROM transactions t
+        LEFT JOIN accounts a ON t.account_id = a.id
+        WHERE t.amount = ?
+          AND t.timestamp BETWEEN ? AND ?
+          AND t.is_deleted = 0
+      `;
+      const params: any[] = [query.amount, minTime, maxTime];
 
-      if (row) {
+      // 1. STRICT PROVIDER ISOLATION:
+      // If candidate provider is known, it CAN NEVER match a different known provider!
+      if (candidateProvider) {
+        querySql += ` AND (
+          COALESCE(
+            t.provider_key,
+            a.provider_key,
+            CASE 
+              WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+              WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+              WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+              ELSE NULL
+            END
+          ) = ? OR COALESCE(
+            t.provider_key,
+            a.provider_key,
+            CASE 
+              WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+              WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+              WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+              ELSE NULL
+            END
+          ) IS NULL
+        )`;
+        params.push(candidateProvider);
+      }
+
+      // 2. TRANSACTION DIRECTION SCOPING:
+      // An INCOME can NEVER proximity-match an EXPENSE or TRANSFER!
+      if (query.type) {
+        if (query.type === 'INCOME') {
+          querySql += " AND t.type = 'INCOME'";
+        } else if (query.type === 'EXPENSE' || query.type === 'TRANSFER') {
+          querySql += " AND t.type IN ('EXPENSE', 'TRANSFER')";
+        }
+      }
+
+      // 3. TRANSFER SEMANTICS:
+      // External transfer (destinationAccountId is null) never matches internal transfer with destination_account_id IS NOT NULL
+      if (query.type === 'TRANSFER' && !query.destinationAccountId) {
+        querySql += " AND t.destination_account_id IS NULL";
+      }
+
+      // 4. ACCOUNT SCOPING:
+      if (query.accountId) {
+        querySql += " AND (t.account_id = ? OR t.account_id IS NULL)";
+        params.push(query.accountId);
+      }
+
+      querySql += `
+        ORDER BY ABS(strftime('%s', t.timestamp) - strftime('%s', ?)) ASC
+        LIMIT 5;
+      `;
+      params.push(query.timestamp);
+
+      const rows = await db.getAllAsync<any>(querySql, params);
+
+      for (const row of rows) {
+        // Enforce candidate provider !== existing provider check in JS as an extra safeguard
+        if (candidateProvider && row.effective_provider && candidateProvider !== row.effective_provider) {
+          console.log(`[DUPLICATE:SKIP] Candidate provider ${candidateProvider} does not match existing tx provider ${row.effective_provider}. Skipping collision.`);
+          continue;
+        }
+
+        // Check reference non-conflict:
+        // If BOTH have valid references, and they differ, they CANNOT be duplicates!
+        const existingRef = (row.ref_number || row.transaction_number || '').trim();
+        const existingRefValid = RegexParser.isValidReference(existingRef);
+        const candidateRefValid = !!refToSearch && RegexParser.isValidReference(refToSearch);
+
+        if (candidateRefValid && existingRefValid && refToSearch !== existingRef) {
+          console.log(`[DUPLICATE:SKIP] Distinct references (${refToSearch} vs ${existingRef}) for amount=${query.amount}. Not a duplicate.`);
+          continue;
+        }
+
+        const providerLabel = candidateProvider || row.effective_provider || row.account_name;
         return {
           matchFound: true,
           transaction: mapRowToTx(row),
           confidence: 'PROXIMITY_AMOUNT',
-          matchReason: `Proximity match: exact amount (${query.amount} ETB) within ±${targetTolerance}m on ${row.account_name}.`,
+          matchReason: `Proximity match: exact amount (${query.amount} ETB) within ±${targetTolerance}m on ${providerLabel}.`,
         };
       }
     }

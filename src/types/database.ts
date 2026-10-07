@@ -52,6 +52,9 @@ export interface DuplicateMatchQuery {
   accountId?: string | null;
   cleanMerchant?: string | null;
   toleranceMinutes?: number;
+  provider?: ProviderKey | 'UNKNOWN' | null;
+  type?: TransactionType | null;
+  destinationAccountId?: string | null;
 }
 
 export interface VaultProfile {
@@ -102,6 +105,7 @@ export interface Transaction {
   id: string;
   accountId: string | null; // Nullable when transaction is unmatched/unassigned
   destinationAccountId?: string | null; // Set when type === 'TRANSFER'
+  providerKey?: ProviderKey | null;
 
   // --- Current Active State (User-editable or active interpretation) ---
   categoryId?: string | null;

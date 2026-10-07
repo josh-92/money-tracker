@@ -211,19 +211,32 @@ function simulate4TierMatch(
 
   // Tier 4: Amount + Timestamp Proximity Window
   if (query.amount > 0 && query.timestamp) {
+    const candidateProvider = query.provider && query.provider !== 'UNKNOWN' ? query.provider : null;
     const match = ledger.find((t) => {
       if (t.isDeleted || t.amount !== query.amount) return false;
-      if (t.refNumber && refToSearch) return false;
-      if (t.transactionNumber && refToSearch) return false;
+      // 1. Strict provider isolation
+      if (candidateProvider && t.providerKey && candidateProvider !== t.providerKey) return false;
+      // 2. Transaction direction scoping
+      if (query.type) {
+        if (query.type === 'INCOME' && t.type !== 'INCOME') return false;
+        if ((query.type === 'EXPENSE' || query.type === 'TRANSFER') && t.type === 'INCOME') return false;
+      }
+      // 3. Reference non-conflict
+      const existingRef = (t.refNumber || t.transactionNumber || '').trim();
+      const existingRefValid = RegexParser.isValidReference(existingRef);
+      const candidateRefValid = !!refToSearch && RegexParser.isValidReference(refToSearch);
+      if (candidateRefValid && existingRefValid && refToSearch !== existingRef) return false;
+
       const tTime = new Date(t.timestamp).getTime();
       return tTime >= minTime && tTime <= maxTime;
     });
     if (match) {
+      const providerLabel = (query.provider && query.provider !== 'UNKNOWN' ? query.provider : null) || match.providerKey || 'ledger';
       return {
         matchFound: true,
         transaction: match,
         confidence: 'PROXIMITY_AMOUNT',
-        matchReason: `Proximity match: exact amount (${query.amount} ETB) within ±${targetTolerance}m.`,
+        matchReason: `Proximity match: exact amount (${query.amount} ETB) within ±${targetTolerance}m on ${providerLabel}.`,
       };
     }
   }
@@ -237,10 +250,11 @@ function simulate4TierMatch(
 }
 
 const ledger: Transaction[] = [
-  originalTx, // 450 ETB, CBE, Ref: FT26277, Shoa Supermarket, 2026-10-04T14:15:00Z
+  { ...originalTx, providerKey: 'CBE' }, // 450 ETB, CBE, Ref: FT26277, Shoa Supermarket, 2026-10-04T14:15:00Z
   {
     id: 'tx_telebirr_002',
     accountId: 'acc_telebirr',
+    providerKey: 'TELEBIRR',
     amount: 350.0,
     type: 'EXPENSE',
     merchantName: "Kaldi's Coffee",
@@ -364,6 +378,83 @@ assert(
   computedExpense === 150,
   'Spending semantics: external P2P transfer (50 ETB) counted as spending, internal transfer (200 ETB) excluded',
   `Expected 150, got ${computedExpense}`
+);
+
+// ---------------------------------------------------------
+// 4. Provider Isolation & Semantic Deduplication Tests (Section 17)
+// ---------------------------------------------------------
+console.log('\n--- 4. Provider Isolation & Cross-Provider Collision Tests ---');
+
+const crossProviderLedger: Transaction[] = [
+  {
+    id: 'tx_tb_20',
+    accountId: 'acc_telebirr',
+    providerKey: 'TELEBIRR',
+    amount: 20.0,
+    type: 'TRANSFER',
+    merchantName: 'Abebe',
+    cleanMerchant: 'Abebe',
+    source: 'NOTIFICATION',
+    status: 'CONFIRMED',
+    timestamp: '2026-10-07T14:00:00.000Z',
+    refNumber: 'TR1122',
+    isDeleted: false,
+    createdAt: '2026-10-07T14:00:00.000Z',
+    updatedAt: '2026-10-07T14:00:00.000Z',
+  },
+];
+
+// Test 1: Cross-provider same amount (Existing Telebirr 20 ETB vs New Awash 20 ETB)
+const awashCandidateResult = simulate4TierMatch(crossProviderLedger, {
+  amount: 20.0,
+  timestamp: '2026-10-07T14:01:00.000Z', // 1 minute later
+  provider: 'AWASH',
+  type: 'TRANSFER',
+  toleranceMinutes: 120,
+});
+assert(
+  !awashCandidateResult.matchFound,
+  'Test 1 (Cross-provider same amount): Awash 20 ETB does NOT duplicate against Telebirr 20 ETB within ±120m'
+);
+
+// Test 2: Same provider same reference -> duplicate
+const sameRefResult = simulate4TierMatch(crossProviderLedger, {
+  amount: 20.0,
+  timestamp: '2026-10-07T14:00:30.000Z',
+  provider: 'TELEBIRR',
+  type: 'TRANSFER',
+  refNumber: 'TR1122',
+});
+assert(
+  sameRefResult.matchFound && sameRefResult.confidence === 'EXACT_REFERENCE',
+  'Test 2 (Same provider same ref): Exact reference match detected as duplicate'
+);
+
+// Test 3: Same provider different valid references -> NOT duplicate
+const diffRefResult = simulate4TierMatch(crossProviderLedger, {
+  amount: 20.0,
+  timestamp: '2026-10-07T14:02:00.000Z',
+  provider: 'TELEBIRR',
+  type: 'TRANSFER',
+  refNumber: 'TR9988',
+  toleranceMinutes: 120,
+});
+assert(
+  !diffRefResult.matchFound,
+  'Test 3 (Same provider diff valid refs): Distinct references (TR1122 vs TR9988) are NOT duplicate'
+);
+
+// Test 6: Strict Provider Isolation: Awash candidate never matches Telebirr transaction
+const provIsoResult = simulate4TierMatch(crossProviderLedger, {
+  amount: 20.0,
+  timestamp: '2026-10-07T14:00:00.000Z',
+  provider: 'AWASH',
+  type: 'TRANSFER',
+  toleranceMinutes: 120,
+});
+assert(
+  !provIsoResult.matchFound,
+  'Test 6 (Provider Isolation): Awash candidate never matches Telebirr transaction as proximity match'
 );
 
 console.log(`\n====================================================`);

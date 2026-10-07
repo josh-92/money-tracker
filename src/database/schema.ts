@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     id TEXT PRIMARY KEY,
     account_id TEXT, -- Nullable when transaction is unmatched/unassigned
     destination_account_id TEXT, -- Populated only if type is 'TRANSFER'
+    provider_key TEXT, -- 'CBE', 'TELEBIRR', 'AWASH', 'CASH', 'CUSTOM'
     
     -- Current Active / User-Editable Values
     category_id TEXT,
@@ -187,6 +188,7 @@ export async function runMigrations(db: SQLite.SQLiteDatabase): Promise<void> {
   const columnsToAdd: Array<{ name: string; type: string }> = [
     { name: 'destination_account_id', type: 'TEXT' },
     { name: 'clean_merchant', type: 'TEXT' },
+    { name: 'provider_key', type: 'TEXT' },
     { name: 'raw_source_message', type: 'TEXT' },
     { name: 'source_timestamp', type: 'TEXT' },
     { name: 'ref_number', type: 'TEXT' },
@@ -216,6 +218,32 @@ export async function runMigrations(db: SQLite.SQLiteDatabase): Promise<void> {
     }
   }
 
+  // Backfill provider_key for existing records
+  try {
+    await db.runAsync(`
+      UPDATE transactions 
+      SET provider_key = (SELECT provider_key FROM accounts WHERE accounts.id = transactions.account_id)
+      WHERE provider_key IS NULL AND account_id IS NOT NULL;
+    `);
+    await db.runAsync(`
+      UPDATE transactions 
+      SET provider_key = 'TELEBIRR'
+      WHERE provider_key IS NULL AND (parser_version LIKE 'telebirr%' OR template_id LIKE 'telebirr%');
+    `);
+    await db.runAsync(`
+      UPDATE transactions 
+      SET provider_key = 'AWASH'
+      WHERE provider_key IS NULL AND (parser_version LIKE 'awash%' OR template_id LIKE 'awash%');
+    `);
+    await db.runAsync(`
+      UPDATE transactions 
+      SET provider_key = 'CBE'
+      WHERE provider_key IS NULL AND (parser_version LIKE 'cbe%' OR template_id LIKE 'cbe%');
+    `);
+  } catch (err) {
+    console.warn('[DB] Migration provider_key backfill notice:', err);
+  }
+
   // Migrate vault_profile columns if missing
   try {
     const profileTableInfo = await db.getAllAsync<{ name: string }>('PRAGMA table_info(vault_profile);');
@@ -237,6 +265,7 @@ export async function runMigrations(db: SQLite.SQLiteDatabase): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
     CREATE INDEX IF NOT EXISTS idx_transactions_ref_number ON transactions(ref_number);
     CREATE INDEX IF NOT EXISTS idx_transactions_txn_number ON transactions(transaction_number);
+    CREATE INDEX IF NOT EXISTS idx_transactions_provider_key ON transactions(provider_key);
     CREATE INDEX IF NOT EXISTS idx_receipts_transaction ON receipts(transaction_id);
   `);
 }
