@@ -5,7 +5,7 @@
  * and recent ledger transactions.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -18,7 +18,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   Plus,
-  Camera,
+  SlidersHorizontal,
   ArrowRightLeft,
   Target,
   Search,
@@ -78,22 +78,28 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, isDark = tru
   } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
+  // Request sequence counter to discard stale snapshots from out-of-order queries
+  const loadSeqRef = useRef(0);
+
   const loadData = async () => {
+    const seq = ++loadSeqRef.current;
     try {
       const p = await dbService.getVaultProfile();
-      setProfile(p);
-
       const nw = await dbService.getTotalNetWorth();
-      setNetWorth(nw.total);
-
       const txs = await dbService.getTransactions({ limit: 5 });
-      setRecentTransactions(txs);
-
       const pending = await dbService.getTransactions({ status: 'PENDING_REVIEW' });
-      setUnconfirmedCount(pending.length);
-
       const now = new Date();
       const metrics = await dbService.getMonthlyMetrics(now.getMonth() + 1, now.getFullYear());
+
+      // If a newer loadData call has started, discard this older query result
+      if (seq !== loadSeqRef.current) {
+        return;
+      }
+
+      setProfile(p);
+      setNetWorth(nw.total);
+      setRecentTransactions(txs);
+      setUnconfirmedCount(pending.length);
       setMonthlyMetrics(metrics);
     } catch (err) {
       console.error('Error loading home data:', err);
@@ -243,9 +249,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, isDark = tru
             isDark={isDark}
           />
           <ActionButton
-            icon={<Camera size={22} color={theme.primary} />}
-            label="Scan Receipt"
-            onPress={() => navigation.navigate('ReceiptScanner')}
+            icon={<SlidersHorizontal size={22} color={theme.primary} />}
+            label="Reconcile"
+            onPress={() => navigation.navigate('Reconcile')}
             isDark={isDark}
           />
           <ActionButton
@@ -264,37 +270,47 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation, isDark = tru
 
         {/* Contextual Spending Insight */}
         {monthlyMetrics && monthlyMetrics.totalExpense > 0 && monthlyMetrics.topCategories.length > 0 ? (
-          <VaultCard isDark={isDark} style={styles.insightCard} variant="highlight">
-            <View style={styles.insightRow}>
-              <View style={[styles.insightIconCircle, { backgroundColor: theme.warningBackground }]}>
-                <AlertTriangle size={18} color={theme.warning} />
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={() => navigation.navigate('Budgets')}
+          >
+            <VaultCard isDark={isDark} style={styles.insightCard} variant="highlight">
+              <View style={styles.insightRow}>
+                <View style={[styles.insightIconCircle, { backgroundColor: theme.warningBackground }]}>
+                  <AlertTriangle size={18} color={theme.warning} />
+                </View>
+                <View style={styles.insightTextContainer}>
+                  <Text style={[styles.insightTitle, { color: theme.textPrimary }]}>
+                    {new Date().toLocaleString('en-US', { month: 'long' })} Spending Update
+                  </Text>
+                  <Text style={[styles.insightBody, { color: theme.textSecondary }]}>
+                    {monthlyMetrics.topCategories[0].name} is your largest category ({monthlyMetrics.topCategories[0].amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB). Total monthly spend: {monthlyMetrics.totalExpense.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB. Tap to view budgets →
+                  </Text>
+                </View>
               </View>
-              <View style={styles.insightTextContainer}>
-                <Text style={[styles.insightTitle, { color: theme.textPrimary }]}>
-                  {new Date().toLocaleString('en-US', { month: 'long' })} Spending Update
-                </Text>
-                <Text style={[styles.insightBody, { color: theme.textSecondary }]}>
-                  {monthlyMetrics.topCategories[0].name} is your largest category ({monthlyMetrics.topCategories[0].amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB). Total monthly spend: {monthlyMetrics.totalExpense.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ETB.
-                </Text>
-              </View>
-            </View>
-          </VaultCard>
+            </VaultCard>
+          </TouchableOpacity>
         ) : (
-          <VaultCard isDark={isDark} style={styles.insightCard} variant="highlight">
-            <View style={styles.insightRow}>
-              <View style={[styles.insightIconCircle, { backgroundColor: theme.incomeBackground }]}>
-                <TrendingUp size={18} color={theme.income} />
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={() => navigation.navigate('Budgets')}
+          >
+            <VaultCard isDark={isDark} style={styles.insightCard} variant="highlight">
+              <View style={styles.insightRow}>
+                <View style={[styles.insightIconCircle, { backgroundColor: theme.incomeBackground }]}>
+                  <TrendingUp size={18} color={theme.income} />
+                </View>
+                <View style={styles.insightTextContainer}>
+                  <Text style={[styles.insightTitle, { color: theme.textPrimary }]}>
+                    {new Date().toLocaleString('en-US', { month: 'long' })} Spending Update
+                  </Text>
+                  <Text style={[styles.insightBody, { color: theme.textSecondary }]}>
+                    No expense transactions recorded this month. Your budget is intact. Tap to manage budgets →
+                  </Text>
+                </View>
               </View>
-              <View style={styles.insightTextContainer}>
-                <Text style={[styles.insightTitle, { color: theme.textPrimary }]}>
-                  {new Date().toLocaleString('en-US', { month: 'long' })} Spending Update
-                </Text>
-                <Text style={[styles.insightBody, { color: theme.textSecondary }]}>
-                  No expense transactions recorded this month. Your budget is intact.
-                </Text>
-              </View>
-            </View>
-          </VaultCard>
+            </VaultCard>
+          </TouchableOpacity>
         )}
 
         {/* Recent Transactions Section */}

@@ -51,7 +51,7 @@ export class RegexParser {
 
     // 1. Strict Provider Isolation: When provider is known, dispatch ONLY to that provider's parser
     if (providerKey && providerKey !== 'UNKNOWN') {
-      if (providerKey === 'TELEBIRR') return this.parseTelebirr(text);
+      if (providerKey === 'TELEBIRR') return this.parseTelebirr(text, senderHint);
       if (providerKey === 'CBE') return this.parseCBE(text, senderHint);
       if (providerKey === 'AWASH') return this.parseAwash(text, senderHint);
       return null;
@@ -81,7 +81,7 @@ export class RegexParser {
       /\b(?:telebirr|127|ቴሌብር)\b/i.test(text) ||
       /\b(?:CR|TR|RC|AT|CO|CI)\d[A-Z0-9]{3,}\b/i.test(text)
     ) {
-      return this.parseTelebirr(text);
+      return this.parseTelebirr(text, senderHint);
     }
 
     if (
@@ -103,9 +103,13 @@ export class RegexParser {
   // TELEBIRR PARSER (English & Amharic)
   // =========================================================================
 
-  public static parseTelebirr(text: string): ParsedBankNotification | null {
+  public static parseTelebirr(text: string, senderHint?: string): ParsedBankNotification | null {
+    const hint = (senderHint || '').toUpperCase();
     const isTelebirrContext =
       /telebirr|127|ቴሌብር/i.test(text) ||
+      hint.includes('TELEBIRR') ||
+      hint === '127' ||
+      hint.includes('ETYDIC') ||
       /\b(?:CR|TR|RC|AT|CO|CI)\d[A-Z0-9]{3,}\b/i.test(text) ||
       /(?:Txn|Transaction)\s+(?:number|ID|No)(?:\s+is)?[:\s]+[A-Z0-9]{4,}/i.test(text) ||
       /የግብይት\s*ቁጥር/i.test(text);
@@ -424,13 +428,13 @@ export class RegexParser {
     // "Dear Tanya, your Acc. ***7852 has been debited with ETB 450.00 on 04/10/2026 14:15 for Shoa Supermarket. Balance: ETB 6,800.00. Ref: FT26277."
     // "Dear Customer, your Account 100012345678 has been debited with ETB 1,500.00 on 04-10-2026. Reason: ATM Withdrawal. Balance: ETB 5,300.00. Txn: FT998877."
     // -------------------------------------------------------------
-    const cbeDebit = /Acc\.?\s*([*xX\d]+)\s+has\s+been\s+debited\s+with\s+ETB\s+([\d,]+(?:\.\d{1,2})?)(?:\s+on\s+([\d\/\-:\s]+))?\s+(?:for|Reason:)\s+(.+?)\.\s*Balance/i;
+    const cbeDebit = /(?:account|Acc\.?)\s*([*xX\d]+)\s+(?:has\s+been|is|was)?\s*debited\s*(?:with|by)?\s*ETB\s*([\d,]+(?:\.\d{1,2})?)(?:\s+on\s+([\d\/\-:\s]+))?(?:\s+(?:for|Reason:)\s+(.+?))?(?:\.|\s+(?:Balance|Ref|Reference|Txn|$))/i;
     const mCbeDebit = text.match(cbeDebit);
     if (mCbeDebit) {
       const accountMask = this.normalizeAccountMask(mCbeDebit[1]);
       const amount = this.parseAmount(mCbeDebit[2]);
       const dateStr = mCbeDebit[3]?.trim();
-      const merchant = mCbeDebit[4].trim();
+      const merchant = (mCbeDebit[4] || 'CBE Debit').trim();
       const balance = this.extractBalance(text);
       const ref = this.extractRegex(text, /(?:Ref|Txn|Reference)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
@@ -492,13 +496,13 @@ export class RegexParser {
     // Pattern CBE-3: Credit Alert / Inflow (English)
     // "Dear Tanya, your Acc. ***7852 has been credited with ETB 25,000.00 on 04/10/2026 by TECH PLC. Balance: ETB 31,800.00. Ref: FT889900."
     // -------------------------------------------------------------
-    const cbeCredit = /Acc\.?\s*([*xX\d]+)\s+has\s+been\s+credited\s+with\s+ETB\s+([\d,]+(?:\.\d{1,2})?)(?:\s+on\s+([\d\/\-:\s]+))?\s+(?:by|from)\s+(.+?)\.\s*Balance/i;
+    const cbeCredit = /(?:account|Acc\.?)\s*([*xX\d]+)\s+(?:has\s+been|is|was)?\s*credited\s*(?:with|by)?\s*ETB\s*([\d,]+(?:\.\d{1,2})?)(?:\s+on\s+([\d\/\-:\s]+))?(?:\s+(?:by|from)\s+(.+?))?(?:\.|\s+(?:Balance|Ref|Reference|Txn|$))/i;
     const mCbeCredit = text.match(cbeCredit);
     if (mCbeCredit) {
       const accountMask = this.normalizeAccountMask(mCbeCredit[1]);
       const amount = this.parseAmount(mCbeCredit[2]);
       const dateStr = mCbeCredit[3]?.trim();
-      const sender = mCbeCredit[4].trim();
+      const sender = (mCbeCredit[4] || 'CBE Credit').trim();
       const balance = this.extractBalance(text);
       const ref = this.extractRegex(text, /(?:Ref|Txn|Reference)(?:\s+is)?[:\s]+([A-Z0-9]{4,})/i);
 
@@ -670,6 +674,7 @@ export class RegexParser {
       /AW\d+/i.test(text) ||
       (senderHint && senderHint.toUpperCase().includes('AWASH')) ||
       (senderHint && senderHint.toUpperCase().includes('AWASHPAY')) ||
+      (senderHint && senderHint.includes('8900')) ||
       text.includes('0132***') ||
       text.includes('***3901') ||
       text.includes('አዋሽ');

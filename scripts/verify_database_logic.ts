@@ -186,19 +186,82 @@ function simulate4TierMatch(
     }
   }
 
+  // Tier 2.5: Exact Event / Notification Replay (Durable Store & Bridge Idempotence)
+  if (query.rawSourceMessage && query.rawSourceMessage.trim().length > 10) {
+    const match = ledger.find((t) => {
+      if (t.isDeleted || t.rawSourceMessage !== query.rawSourceMessage) return false;
+      // Condition 1: Exact source timestamp match
+      if (query.sourceTimestamp && t.sourceTimestamp && query.sourceTimestamp === t.sourceTimestamp) {
+        return true;
+      }
+      // Condition 2: Exact balance-after-transaction match
+      if (
+        query.balanceAfterTransaction !== null &&
+        query.balanceAfterTransaction !== undefined &&
+        t.balanceAfterTransaction !== null &&
+        t.balanceAfterTransaction !== undefined &&
+        Number(query.balanceAfterTransaction) === Number(t.balanceAfterTransaction)
+      ) {
+        return true;
+      }
+      // Condition 3: Immediate broadcast within 120s
+      const diff = Math.abs(new Date(query.timestamp).getTime() - new Date(t.timestamp).getTime());
+      return diff <= 120 * 1000;
+    });
+    if (match) {
+      return {
+        matchFound: true,
+        transaction: match,
+        confidence: 'EXACT_EVENT_REPLAY',
+        matchReason: 'Exact notification replay: identical raw message already persisted.',
+      };
+    }
+  }
+
   // Tier 3: Clean Merchant + Account + Same Date + Amount
   if (query.cleanMerchant && query.accountId && query.amount > 0) {
     const targetDay = query.timestamp.substring(0, 10);
-    const match = ledger.find(
-      (t) =>
-        t.accountId === query.accountId &&
-        t.amount === query.amount &&
-        t.cleanMerchant?.toLowerCase() === query.cleanMerchant?.toLowerCase() &&
-        t.timestamp.substring(0, 10) === targetDay &&
-        (!t.refNumber || !refToSearch) &&
-        (!t.transactionNumber || !refToSearch) &&
-        !t.isDeleted
-    );
+    const match = ledger.find((t) => {
+      if (t.isDeleted) return false;
+      if (t.accountId !== query.accountId || t.amount !== query.amount) return false;
+      if (t.cleanMerchant?.toLowerCase() !== query.cleanMerchant?.toLowerCase()) return false;
+      if (t.timestamp.substring(0, 10) !== targetDay) return false;
+
+      // Reference conflict check
+      const existingRef = (t.refNumber || t.transactionNumber || '').trim();
+      const existingRefValid = RegexParser.isValidReference(existingRef);
+      const candidateRefValid = !!refToSearch && RegexParser.isValidReference(refToSearch);
+
+      if (candidateRefValid && existingRefValid && refToSearch !== existingRef) {
+        return false;
+      }
+      if (candidateRefValid && existingRefValid && refToSearch === existingRef) {
+        return true;
+      }
+
+      // For ref-less transactions, require corroborating evidence:
+      const candBalance =
+        query.balanceAfterTransaction !== undefined && query.balanceAfterTransaction !== null
+          ? Number(query.balanceAfterTransaction)
+          : null;
+      const existBalance =
+        t.balanceAfterTransaction !== undefined && t.balanceAfterTransaction !== null
+          ? Number(t.balanceAfterTransaction)
+          : null;
+
+      if (candBalance !== null && existBalance !== null) {
+        return candBalance === existBalance;
+      }
+
+      if (query.rawSourceMessage && t.rawSourceMessage === query.rawSourceMessage) {
+        const timeDiff = Math.abs(new Date(query.timestamp).getTime() - new Date(t.timestamp).getTime());
+        return timeDiff <= 120 * 1000;
+      }
+
+      // Without corroboration, distinct transactions on the same day must coexist!
+      return false;
+    });
+
     if (match) {
       return {
         matchFound: true,
@@ -267,6 +330,24 @@ const ledger: Transaction[] = [
     createdAt: '2026-10-04T09:00:00.000Z',
     updatedAt: '2026-10-04T09:00:00.000Z',
   },
+  {
+    id: 'tx_awash_morning',
+    accountId: 'acc_awash',
+    providerKey: 'AWASH',
+    amount: 25.0,
+    type: 'TRANSFER',
+    merchantName: 'Dawit Tsige',
+    cleanMerchant: 'Dawit Tsige',
+    source: 'NOTIFICATION',
+    rawSourceMessage: 'Your account ***3901 transferred ETB 25.00 to Dawit Tsige on 08/10/2026. Available Balance: ETB 4,650.00.',
+    sourceTimestamp: '2026-10-08T06:00:00.000Z',
+    timestamp: '2026-10-08T06:00:00.000Z',
+    balanceAfterTransaction: 4650,
+    status: 'CONFIRMED',
+    isDeleted: false,
+    createdAt: '2026-10-08T06:00:00.000Z',
+    updatedAt: '2026-10-08T06:00:00.000Z',
+  },
 ];
 
 // Test Tier 1
@@ -292,16 +373,53 @@ assert(
   'Tier 2: Telebirr transaction number returns EXACT_REFERENCE confidence'
 );
 
-// Test Tier 3 (Clean Merchant + Account + Date + Amount without ref)
-const t3Result = simulate4TierMatch(ledger, {
-  amount: 350,
-  timestamp: '2026-10-04T18:00:00.000Z', // Different time, same day
-  accountId: 'acc_telebirr',
-  cleanMerchant: "Kaldi's Coffee",
+// Test Tier 2.5: Exact Event / Notification Replay (same rawSourceMessage & sourceTimestamp)
+const t25Result = simulate4TierMatch(ledger, {
+  amount: 25,
+  timestamp: '2026-10-08T06:00:00.000Z',
+  accountId: 'acc_awash',
+  provider: 'AWASH',
+  cleanMerchant: 'Dawit Tsige',
+  type: 'TRANSFER',
+  rawSourceMessage: 'Your account ***3901 transferred ETB 25.00 to Dawit Tsige on 08/10/2026. Available Balance: ETB 4,650.00.',
+  sourceTimestamp: '2026-10-08T06:00:00.000Z',
+  balanceAfterTransaction: 4650,
 });
 assert(
-  t3Result.matchFound && t3Result.confidence === 'HIGH_METADATA',
-  'Tier 3: Same merchant, account, amount, and date returns HIGH_METADATA confidence'
+  t25Result.matchFound && t25Result.confidence === 'EXACT_EVENT_REPLAY',
+  'Tier 2.5: Exact event replay with identical raw message and source timestamp returns EXACT_EVENT_REPLAY'
+);
+
+// Test Tier 3: Ref-less transactions with identical remaining balance
+const t3BalanceMatch = simulate4TierMatch(ledger, {
+  amount: 25,
+  timestamp: '2026-10-08T06:01:00.000Z',
+  accountId: 'acc_awash',
+  provider: 'AWASH',
+  cleanMerchant: 'Dawit Tsige',
+  type: 'TRANSFER',
+  balanceAfterTransaction: 4650, // Identical remaining balance proves same transaction
+});
+assert(
+  t3BalanceMatch.matchFound && t3BalanceMatch.confidence === 'HIGH_METADATA',
+  'Tier 3: Ref-less transactions with identical balance-after-transaction return HIGH_METADATA confidence'
+);
+
+// CRITICAL TEST: Same provider, same merchant, same amount, same date, but different transaction (09:00 vs 14:00, different balance) -> NOT DUPLICATE!
+const awashAfternoon = simulate4TierMatch(ledger, {
+  amount: 25,
+  timestamp: '2026-10-08T11:00:00.000Z', // 14:00 local, 5 hours later
+  accountId: 'acc_awash',
+  provider: 'AWASH',
+  cleanMerchant: 'Dawit Tsige',
+  type: 'TRANSFER',
+  rawSourceMessage: 'Your account ***3901 transferred ETB 25.00 to Dawit Tsige on 08/10/2026. Available Balance: ETB 4,625.00.',
+  sourceTimestamp: '2026-10-08T11:00:00.000Z',
+  balanceAfterTransaction: 4625, // Different remaining balance!
+});
+assert(
+  !awashAfternoon.matchFound,
+  'CRITICAL: Same provider, merchant, amount, date, but different transaction (09:00 vs 14:00) is NOT duplicate'
 );
 
 // Test Tier 4 (Proximity Window within 60 minutes, matching amount, no ref, no merchant)

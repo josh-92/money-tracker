@@ -4,13 +4,15 @@
  * Includes biometric fallback and keypad matching the Figma design.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
-  Alert,
+  ActivityIndicator,
+  AppState,
+  AppStateStatus,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Lock, Fingerprint, Delete } from 'lucide-react-native';
@@ -31,6 +33,12 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({ isDark =
   const [digits, setDigits] = useState<string[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lockoutSec, setLockoutSec] = useState(0);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [isUnlocking, setIsUnlocking] = useState(false);
+
+  const isBiometricInFlightRef = useRef(false);
+  const userDismissedBiometricRef = useRef(false);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   useEffect(() => {
     // Check initial lockout state
@@ -40,9 +48,42 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({ isDark =
       setErrorMsg(`Too many failed attempts. Try again in ${status.lockoutRemainingSeconds}s.`);
     }
 
-    // Attempt biometric unlock immediately on screen mount
-    attemptBiometric();
+    // Attempt biometric unlock on screen mount with a slight delay for native window attachment
+    const mountTimer = setTimeout(() => {
+      if (!userDismissedBiometricRef.current && !isBiometricInFlightRef.current) {
+        attemptBiometric(false);
+      }
+    }, 150);
+
+    return () => clearTimeout(mountTimer);
   }, []);
+
+  // Listen to AppState changes so returning to foreground re-prompts biometric
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      const previous = appStateRef.current;
+      appStateRef.current = nextState;
+
+      // When app goes to background, user left the session — reset dismissal flag
+      if (nextState === 'background') {
+        userDismissedBiometricRef.current = false;
+      }
+
+      // When returning to foreground from background or inactive, re-prompt if enabled
+      if ((previous === 'background' || previous === 'inactive') && nextState === 'active') {
+        if (!userDismissedBiometricRef.current && !isBiometricInFlightRef.current && lockoutSec <= 0) {
+          // Defer briefly to allow Android activity focus to settle
+          setTimeout(() => {
+            if (!userDismissedBiometricRef.current && !isBiometricInFlightRef.current) {
+              attemptBiometric(false);
+            }
+          }, 150);
+        }
+      }
+    });
+
+    return () => sub.remove();
+  }, [lockoutSec]);
 
   useEffect(() => {
     if (lockoutSec <= 0) return;
@@ -59,81 +100,106 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({ isDark =
     return () => clearInterval(timer);
   }, [lockoutSec]);
 
-  const attemptBiometric = async () => {
+  const attemptBiometric = async (fromManualTap = false) => {
+    if (isBiometricInFlightRef.current || isUnlocking) return;
+    if (fromManualTap) {
+      userDismissedBiometricRef.current = false;
+    }
+    isBiometricInFlightRef.current = true;
+
     try {
       const profile = await dbService.getVaultProfile();
       if (profile?.biometricEnabled) {
         const success = await vaultSecurity.authenticateBiometric();
         if (success) {
+          setIsUnlocking(true);
           sessionManager.unlock();
+        } else {
+          // User cancelled prompt or backed out to use PIN
+          userDismissedBiometricRef.current = true;
         }
       }
     } catch {
-      // Biometrics not available, fallback to PIN
+      userDismissedBiometricRef.current = true;
+    } finally {
+      isBiometricInFlightRef.current = false;
     }
   };
 
   const handlePressDigit = async (d: string) => {
-    if (lockoutSec > 0) return;
+    if (lockoutSec > 0 || isVerifying || isUnlocking) return;
     if (digits.length >= 4) return;
     const newDigits = [...digits, d];
     setDigits(newDigits);
     setErrorMsg(null);
 
     if (newDigits.length === 4) {
-      const enteredPin = newDigits.join('');
-      const profile = await dbService.getVaultProfile();
+      setIsVerifying(true);
 
-      if (profile && profile.passcodeHash) {
-        const result = await vaultSecurity.verifyPasscodeWithRateLimit(
-          enteredPin,
-          profile.salt,
-          profile.passcodeHash
-        );
+      try {
+        const enteredPin = newDigits.join('');
+        const profile = await dbService.getVaultProfile();
 
-        if (result.isValid) {
-          // If legacy hash detected and needs rehash, migrate transparently to PBKDF2
-          if (result.needsRehash) {
-            try {
-              const newHash = await vaultSecurity.hashPasscode(enteredPin, profile.salt);
-              await dbService.updateVaultProfile({
-                passcodeHash: newHash,
-              });
-            } catch (rehashErr) {
-              console.warn('Passcode rehash migration failed:', rehashErr);
+        if (profile && profile.passcodeHash) {
+          const result = await vaultSecurity.verifyPasscodeWithRateLimit(
+            enteredPin,
+            profile.salt,
+            profile.passcodeHash
+          );
+
+          if (result.isValid) {
+            setIsUnlocking(true);
+            // Non-blocking PBKDF2 migration if legacy hash detected
+            if (result.needsRehash) {
+              vaultSecurity
+                .hashPasscode(enteredPin, profile.salt)
+                .then((newHash) => dbService.updateVaultProfile({ passcodeHash: newHash }))
+                .catch((rehashErr) => console.warn('Passcode rehash migration failed:', rehashErr));
             }
-          }
-          sessionManager.unlock();
-        } else {
-          if (result.isLockedOut) {
-            setLockoutSec(result.lockoutRemainingSeconds);
-            setErrorMsg(`Too many failed attempts. Try again in ${result.lockoutRemainingSeconds}s.`);
+            sessionManager.unlock();
           } else {
-            const attemptsLeft = result.attemptsRemaining;
-            const warningSuffix =
-              attemptsLeft <= 2 && attemptsLeft > 0
-                ? ` (${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} remaining)`
-                : '';
-            setErrorMsg(`Incorrect passcode.${warningSuffix} Try again.`);
+            setIsVerifying(false);
+            if (result.isLockedOut) {
+              setLockoutSec(result.lockoutRemainingSeconds);
+              setErrorMsg(`Too many failed attempts. Try again in ${result.lockoutRemainingSeconds}s.`);
+            } else {
+              const attemptsLeft = result.attemptsRemaining;
+              const warningSuffix =
+                attemptsLeft <= 2 && attemptsLeft > 0
+                  ? ` (${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} remaining)`
+                  : '';
+              setErrorMsg(`Incorrect passcode.${warningSuffix} Try again.`);
+            }
+            setDigits([]);
           }
-          setDigits([]);
+        } else {
+          // No passcode configured, unlock
+          setIsUnlocking(true);
+          sessionManager.unlock();
         }
-      } else {
-        // No passcode configured, unlock
-        sessionManager.unlock();
+      } catch (err) {
+        setIsVerifying(false);
+        setDigits([]);
+        setErrorMsg('Authentication error. Please try again.');
       }
     }
   };
 
   const handleDeleteDigit = () => {
+    if (lockoutSec > 0 || isVerifying || isUnlocking) return;
     if (digits.length > 0) {
       setDigits(digits.slice(0, -1));
       setErrorMsg(null);
     }
   };
 
+  const isKeypadDisabled = lockoutSec > 0 || isVerifying || isUnlocking;
+
   return (
-    <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]}>
+    <SafeAreaView
+      style={[styles.safeArea, { backgroundColor: theme.background }]}
+      pointerEvents={isUnlocking ? 'none' : 'auto'}
+    >
       <View style={styles.content}>
         <View style={styles.header}>
           <View style={[styles.iconCircle, { backgroundColor: theme.primaryGlow }]}>
@@ -166,7 +232,21 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({ isDark =
           ))}
         </View>
 
-        {errorMsg && <Text style={[styles.errorText, { color: theme.expense }]}>{errorMsg}</Text>}
+        {/* Status / Loading / Error Message */}
+        <View style={styles.statusContainer}>
+          {isVerifying ? (
+            <View style={styles.loadingRow}>
+              <ActivityIndicator size="small" color={theme.primary} />
+              <Text style={[styles.statusText, { color: theme.textSecondary }]}>
+                Verifying passcode...
+              </Text>
+            </View>
+          ) : errorMsg ? (
+            <Text style={[styles.errorText, { color: theme.expense }]}>{errorMsg}</Text>
+          ) : (
+            <View style={{ height: 20 }} />
+          )}
+        </View>
 
         {/* Numeric Keypad */}
         <View style={styles.keypad}>
@@ -182,8 +262,16 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({ isDark =
                   return (
                     <TouchableOpacity
                       key="bio"
-                      style={[styles.keyButton, { backgroundColor: 'transparent' }]}
-                      onPress={attemptBiometric}
+                      style={[
+                        styles.keyButton,
+                        {
+                          backgroundColor: 'transparent',
+                          opacity: isKeypadDisabled ? 0.35 : 1,
+                        },
+                      ]}
+                      onPress={() => attemptBiometric(true)}
+                      disabled={isKeypadDisabled}
+                      activeOpacity={0.7}
                     >
                       <Fingerprint size={28} color={theme.primary} />
                     </TouchableOpacity>
@@ -193,9 +281,16 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({ isDark =
                   return (
                     <TouchableOpacity
                       key="del"
-                      style={[styles.keyButton, { backgroundColor: 'transparent', opacity: lockoutSec > 0 ? 0.35 : 1 }]}
+                      style={[
+                        styles.keyButton,
+                        {
+                          backgroundColor: 'transparent',
+                          opacity: isKeypadDisabled || digits.length === 0 ? 0.35 : 1,
+                        },
+                      ]}
                       onPress={handleDeleteDigit}
-                      disabled={lockoutSec > 0}
+                      disabled={isKeypadDisabled || digits.length === 0}
+                      activeOpacity={0.7}
                     >
                       <Delete size={24} color={theme.textPrimary} />
                     </TouchableOpacity>
@@ -208,11 +303,11 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({ isDark =
                       styles.keyButton,
                       {
                         backgroundColor: theme.surfaceHighlight,
-                        opacity: lockoutSec > 0 ? 0.35 : 1,
+                        opacity: isKeypadDisabled ? 0.35 : 1,
                       },
                     ]}
                     onPress={() => handlePressDigit(item)}
-                    disabled={lockoutSec > 0}
+                    disabled={isKeypadDisabled}
                     activeOpacity={0.7}
                   >
                     <Text style={[styles.keyNumber, { color: theme.textPrimary }]}>{item}</Text>
@@ -278,10 +373,24 @@ const styles = StyleSheet.create({
     borderRadius: 9,
     borderWidth: 1.5,
   },
+  statusContainer: {
+    minHeight: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.md,
+  },
+  loadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  statusText: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+  },
   errorText: {
     fontSize: typography.fontSize.sm,
     textAlign: 'center',
-    marginBottom: spacing.md,
   },
   keypad: {
     marginBottom: spacing.xl,

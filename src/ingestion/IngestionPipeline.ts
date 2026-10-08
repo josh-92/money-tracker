@@ -17,9 +17,11 @@ import {
   IngestionResult,
 } from './types';
 import { ProviderDetector } from './ProviderDetector';
-import { RegexParser } from './RegexParser';
+import { RegexParser, ParsedBankNotification } from './RegexParser';
 import { dbService, DatabaseService } from '../database/DatabaseService';
-import { Account, TransactionSource as DbTransactionSource } from '../types/database';
+import { Account, TransactionSource as DbTransactionSource, AiOperationType } from '../types/database';
+import { aiService } from '../ai/AiService';
+import { vaultSecurity } from '../security/VaultSecurity';
 
 type IngestionListener = (result: IngestionResult) => void;
 
@@ -82,15 +84,54 @@ export class IngestionPipeline {
       }
 
       // Step 2: Deterministic Regex Parsing WITH STRICT PROVIDER ISOLATION
-      const parsed = RegexParser.parse(candidate.rawText, candidate.senderHint, detection.provider);
+      let parsed: ParsedBankNotification | null = RegexParser.parse(candidate.rawText, candidate.senderHint, detection.provider);
       console.log(`[PIPELINE:PARSER] parse: success=${!!parsed}, provider=${parsed?.provider || 'none'}, amount=${parsed?.amount || 0}, type=${parsed?.type || 'none'}`);
+
+      let aiOperationUsed: AiOperationType | null = null;
+
+      if (!parsed) {
+        // Fallback: Check if legitimate financial candidate and Gemini unknown SMS fallback is enabled
+        const settings = await vaultSecurity.getAiSettings();
+        const hasApiKey = Boolean(await vaultSecurity.getGeminiApiKey());
+
+        if (settings.unknownSmsFallbackEnabled && hasApiKey && detection.isCandidate) {
+          console.log(`[PIPELINE:AI] Invoking Gemini unknown message fallback for provider=${detection.provider}`);
+          const aiResult = await aiService.parseUnknownSms(candidate.rawText);
+
+          if (aiResult.status === 'SUCCESS' && aiResult.data && aiResult.data.amount > 0) {
+            // STRICT PROVIDER ISOLATION: The trusted source/provider is authoritative.
+            // Gemini is not allowed to override the detected provider.
+            parsed = {
+              provider: detection.provider,
+              type: aiResult.data.type,
+              amount: aiResult.data.amount,
+              currency: aiResult.data.currency || 'ETB',
+              merchantName: aiResult.data.merchantName,
+              cleanMerchant: aiResult.data.cleanMerchant || aiResult.data.merchantName,
+              sender: aiResult.data.sender,
+              recipient: aiResult.data.recipient,
+              balanceAfterTransaction: aiResult.data.balance,
+              balance: aiResult.data.balance,
+              refNumber: aiResult.data.refNumber,
+              transactionNumber: aiResult.data.refNumber,
+              timestamp: candidate.timestamp || new Date().toISOString(),
+              rawSourceMessage: candidate.rawText,
+              confidenceScore: aiResult.confidence === 'HIGH' ? 0.85 : 0.70,
+              templateId: 'gemini_unknown_sms',
+              parserVersion: 'gemini_v1_fallback',
+            };
+            aiOperationUsed = 'SMS_FALLBACK';
+          }
+        }
+      }
+
       if (!parsed) {
         console.warn(`[PIPELINE:PARSER] Failed to parse candidate rawText: "${candidate.rawText.substring(0, 60)}..."`);
         return {
           success: false,
           isDuplicate: false,
           status: 'UNPARSED',
-          errorMessage: 'Unable to extract transaction details via regex template.',
+          errorMessage: 'Unable to extract transaction details via regex template or AI fallback.',
         };
       }
 
@@ -130,7 +171,7 @@ export class IngestionPipeline {
         `[PIPELINE:CANDIDATE] Candidate parsed: provider=${normalized.provider}, type=${normalized.type}, amount=${normalized.amount}, ref=${normalized.refNumber ?? 'none'}, txn=${normalized.transactionNumber ?? 'none'}, matchedAccount=${matchedAccountId ?? 'none'}`
       );
 
-      // Step 4: 4-Tier Deduplication Check with Strict Provider Isolation
+      // Step 4: Multi-Tier Deduplication Check with Strict Provider Isolation
       const matchResult = await db.findMatchingTransaction({
         amount: normalized.amount,
         timestamp: normalized.timestamp,
@@ -142,10 +183,18 @@ export class IngestionPipeline {
         type: normalized.type,
         destinationAccountId: null,
         toleranceMinutes: 120,
+        rawSourceMessage: normalized.rawSourceMessage,
+        sourceTimestamp: normalized.sourceTimestamp,
+        balanceAfterTransaction: normalized.balanceAfterTransaction,
       });
 
-      if (matchResult.matchFound) {
-        console.log(`[PIPELINE] Duplicate detected: ${matchResult.matchReason}`);
+      // Definitive duplicate gate: PROXIMITY_AMOUNT alone must never discard an incoming financial notification
+      const isDefinitiveDuplicate =
+        matchResult.matchFound &&
+        (matchResult.confidence === undefined || matchResult.confidence !== 'PROXIMITY_AMOUNT');
+
+      if (isDefinitiveDuplicate) {
+        console.log(`[PIPELINE] Duplicate detected (${matchResult.confidence ?? 'MATCH'}): ${matchResult.matchReason}`);
         const dupResult: IngestionResult = {
           success: true,
           isDuplicate: true,
@@ -167,11 +216,27 @@ export class IngestionPipeline {
           ? 'RECEIPT'
           : 'SMS';
 
+      // Category Inference (Local Rules First)
+      let resolvedCategoryId: string | null = null;
+      try {
+        const catRes = await aiService.categorizeTransaction({
+          merchant: normalized.cleanMerchant,
+          amount: normalized.amount,
+          type: normalized.type,
+          notes: normalized.recipient || normalized.sender,
+        });
+        if (catRes.status === 'SUCCESS' && catRes.data?.categoryId) {
+          resolvedCategoryId = catRes.data.categoryId;
+        }
+      } catch (catErr) {
+        console.warn('[PIPELINE:CATEGORY] Category inference notice:', catErr);
+      }
+
       const newTx = await db.createTransaction({
         accountId: matchedAccountId,
         destinationAccountId: null,
         providerKey: normalized.provider === 'UNKNOWN' ? null : normalized.provider,
-        categoryId: null, // User can assign or AI can auto-categorize in Phase 4
+        categoryId: resolvedCategoryId,
         amount: normalized.amount,
         type: normalized.type,
         merchantName: normalized.merchantName,
@@ -190,6 +255,7 @@ export class IngestionPipeline {
         parserVersion: normalized.parserVersion,
         templateId: normalized.templateId,
         confidenceScore: normalized.confidenceScore,
+        aiOperationUsed: aiOperationUsed || undefined,
         originalAmount: normalized.amount,
         originalMerchantName: normalized.merchantName,
       });

@@ -1,11 +1,21 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "rootDir": ".",
     "baseUrl": ".",
+    "ignoreDeprecations": "6.0",
+    "skipLibCheck": true,
     "paths": {
       "react-native": ["./scripts/mocks/react-native.js"],
       "expo-sqlite": ["./scripts/mocks/expo-sqlite.js"],
-      "expo-clipboard": ["./scripts/mocks/expo-clipboard.js"]
+      "expo-clipboard": ["./scripts/mocks/expo-clipboard.js"],
+      "expo-image-manipulator": ["./scripts/mocks/expo-image-manipulator.js"],
+      "expo-secure-store": ["./scripts/mocks/expo-secure-store.js"],
+      "expo-local-authentication": ["./scripts/mocks/expo-local-authentication.js"],
+      "expo-modules-core": ["./scripts/mocks/expo-modules-core.js"]
     }
+  },
+  "ts-node": {
+    "transpileOnly": true
   }
 }

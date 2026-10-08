@@ -33,6 +33,7 @@ export type AiOperationType =
 
 export type MatchConfidence =
   | 'EXACT_REFERENCE'
+  | 'EXACT_EVENT_REPLAY'
   | 'HIGH_METADATA'
   | 'PROXIMITY_AMOUNT'
   | 'NONE';
@@ -55,6 +56,9 @@ export interface DuplicateMatchQuery {
   provider?: ProviderKey | 'UNKNOWN' | null;
   type?: TransactionType | null;
   destinationAccountId?: string | null;
+  rawSourceMessage?: string | null;
+  sourceTimestamp?: string | null;
+  balanceAfterTransaction?: number | null;
 }
 
 export interface VaultProfile {
@@ -166,6 +170,17 @@ export interface Budget {
   monthlyLimit: number;
   month: number; // 1-12
   year: number; // e.g. 2026
+}
+
+export interface BudgetWithSpent {
+  id?: string;
+  category: Category;
+  monthlyLimit: number;
+  spentAmount: number;
+  remainingAmount: number;
+  percentageSpent: number;
+  status: 'HEALTHY' | 'WARNING' | 'EXCEEDED';
+  hasBudget: boolean;
 }
 
 export interface SavingsGoal {

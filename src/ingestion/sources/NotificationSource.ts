@@ -27,6 +27,8 @@ export class NotificationSource implements TransactionSource {
   private messageHandler: ((msg: CandidateMessage) => Promise<IngestionResult>) | null = null;
   private nativeSubscription: any = null;
   private appStateSubscription: any = null;
+  // Bounded session cache to deduplicate live notification vs durable queue drain replays
+  private processedEventSignatures: Set<string> = new Set();
 
   public onMessage(handler: (msg: CandidateMessage) => Promise<IngestionResult>): void {
     this.messageHandler = handler;
@@ -84,6 +86,7 @@ export class NotificationSource implements TransactionSource {
       this.appStateSubscription.remove();
       this.appStateSubscription = null;
     }
+    this.processedEventSignatures.clear();
   }
 
   /**
@@ -96,6 +99,18 @@ export class NotificationSource implements TransactionSource {
     timestamp?: string;
   }): Promise<void> => {
     if (!this.isRunning || !event || !event.rawText) return;
+
+    // Idempotent delivery check: Skip immediate replays from live + drain dual-delivery
+    const eventKey = `${event.packageName || ''}|${event.timestamp || ''}|${event.rawText}`;
+    if (this.processedEventSignatures.has(eventKey)) {
+      console.log(`[NOTIF:JS] Identical event already processed in current session: replay skipped.`);
+      return;
+    }
+    this.processedEventSignatures.add(eventKey);
+    if (this.processedEventSignatures.size > 100) {
+      const first = this.processedEventSignatures.values().next().value;
+      if (first) this.processedEventSignatures.delete(first);
+    }
 
     console.log(`[NOTIF:JS] received: pkg=${event.packageName || 'unknown'}, title="${event.title || ''}", textLen=${event.rawText.length}`);
 

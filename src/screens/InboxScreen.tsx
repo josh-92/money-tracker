@@ -7,7 +7,7 @@
  * - Shows confidence score & raw snippet
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -71,9 +71,15 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
   const [remarkInput, setRemarkInput] = useState('');
   const [isPermissionGranted, setIsPermissionGranted] = useState(true);
 
-  const loadData = async () => {
+  // Sequence reference counter to eliminate out-of-order race conditions from rapid concurrent events
+  const loadSeqRef = useRef(0);
+
+  const loadData = async (showLoadingSpinner = true) => {
+    const seq = ++loadSeqRef.current;
     try {
-      setLoading(true);
+      if (showLoadingSpinner) {
+        setLoading(true);
+      }
       if (Platform.OS === 'android') {
         setIsPermissionGranted(notificationSource.isPermissionGranted());
         // Auto-check clipboard when viewing review inbox
@@ -84,25 +90,33 @@ export const InboxScreen: React.FC<InboxScreenProps> = ({
         dbService.getAccounts(),
         dbService.getCategories(),
       ]);
+
+      // If a newer loadData call has started, discard this older query result
+      if (seq !== loadSeqRef.current) {
+        return;
+      }
+
       setPendingTransactions(items);
       setUserAccounts(accounts);
       setCategories(cats);
     } catch (err) {
       console.error('Error loading inbox data:', err);
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     loadData();
-    const unsubscribeFocus = navigation.addListener?.('focus', loadData);
+    const unsubscribeFocus = navigation.addListener?.('focus', () => loadData(false));
     const unsubscribeIngestion = ingestionPipeline.subscribe(() => {
-      loadData();
+      loadData(false);
     });
     const subAppState = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
-        loadData();
+        loadData(false);
       }
     });
 

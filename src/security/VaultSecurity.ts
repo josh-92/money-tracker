@@ -116,32 +116,43 @@ class VaultSecurity extends VaultCrypto {
     }
   }
 
-  // --- Biometric Authentication via LocalAuthentication ---
+  // --- Biometric & Device Screen-Lock Authentication via LocalAuthentication ---
+
+  private isBiometricPromptActive = false;
 
   public async isBiometricAvailable(): Promise<boolean> {
     try {
       const compatible = await LocalAuthentication.hasHardwareAsync();
       const enrolled = await LocalAuthentication.isEnrolledAsync();
-      return compatible && enrolled;
+      const enrolledLevel = await LocalAuthentication.getEnrolledLevelAsync();
+      // Eligible if biometric hardware is enrolled OR device-level screen lock (PIN/pattern/password) is set
+      return (compatible && enrolled) || enrolledLevel > LocalAuthentication.SecurityLevel.NONE;
     } catch {
       return false;
     }
   }
 
   public async authenticateBiometric(): Promise<boolean> {
+    if (this.isBiometricPromptActive) {
+      return false;
+    }
     try {
       const available = await this.isBiometricAvailable();
       if (!available) return false;
 
+      this.isBiometricPromptActive = true;
       const result = await LocalAuthentication.authenticateAsync({
         promptMessage: 'Unlock Money Tracker Vault',
         fallbackLabel: 'Use 4-digit Passcode',
+        cancelLabel: 'Use 4-digit Passcode',
         disableDeviceFallback: false,
       });
 
       return result.success;
     } catch {
       return false;
+    } finally {
+      this.isBiometricPromptActive = false;
     }
   }
 }

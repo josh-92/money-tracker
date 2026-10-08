@@ -20,7 +20,6 @@ import { HomeScreen } from '../screens/HomeScreen';
 import { AccountsScreen } from '../screens/AccountsScreen';
 import { AnalyticsScreen } from '../screens/AnalyticsScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
-import { ReceiptScannerModal } from '../screens/ReceiptScannerModal';
 import { AddTransactionModal } from '../screens/AddTransactionModal';
 import { PasscodeLockScreen } from '../screens/PasscodeLockScreen';
 import { ProfileScreen } from '../screens/ProfileScreen';
@@ -37,6 +36,7 @@ import { InboxScreen } from '../screens/InboxScreen';
 import { TransactionsScreen } from '../screens/TransactionsScreen';
 import { TransferModal } from '../screens/TransferModal';
 import { SavingsGoalsScreen } from '../screens/SavingsGoalsScreen';
+import { BudgetsScreen } from '../screens/BudgetsScreen';
 import { ReconcileModal } from '../screens/ReconcileModal';
 import { TransactionDetectionSettingsScreen } from '../screens/TransactionDetectionSettingsScreen';
 import { ImportTransactionsModal } from '../screens/ImportTransactionsModal';
@@ -211,13 +211,11 @@ export const RootNavigator: React.FC<RootNavigatorProps> = ({ isDark, onToggleTh
             <Stack.Screen name="Goals">
               {(props) => <SavingsGoalsScreen {...props} isDark={isDark} />}
             </Stack.Screen>
+            <Stack.Screen name="Budgets">
+              {(props) => <BudgetsScreen {...props} isDark={isDark} />}
+            </Stack.Screen>
 
             {/* Modals */}
-            <Stack.Screen
-              name="ReceiptScanner"
-              children={(props) => <ReceiptScannerModal {...props} isDark={isDark} />}
-              options={{ presentation: 'modal' }}
-            />
             <Stack.Screen
               name="AddTransaction"
               children={(props) => <AddTransactionModal {...props} isDark={isDark} />}

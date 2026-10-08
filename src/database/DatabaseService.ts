@@ -12,6 +12,7 @@ import {
   Transaction,
   VaultProfile,
   Budget,
+  BudgetWithSpent,
   SavingsGoal,
   AiUsageLog,
   MonthlyFinancialReport,
@@ -26,6 +27,7 @@ import {
   runMigrations,
 } from './schema';
 import { RegexParser } from '../ingestion/RegexParser';
+import { LocalFinancialDigest } from '../ai/types';
 
 export class DatabaseService {
   private db: SQLite.SQLiteDatabase | null = null;
@@ -899,6 +901,103 @@ export class DatabaseService {
     }
 
     // ----------------------------------------------------
+    // Tier 2.5: Exact Event / Notification Replay (Durable Store & Bridge Idempotence)
+    // ----------------------------------------------------
+    if (query.rawSourceMessage && query.rawSourceMessage.trim().length > 10) {
+      let eventSql = `
+        SELECT t.*, 
+               COALESCE(a.name, 'Unassigned Account') as account_name,
+               a.provider_key as account_provider_key,
+               COALESCE(
+                 t.provider_key,
+                 a.provider_key,
+                 CASE 
+                   WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+                   WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+                   WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+                   ELSE NULL
+                 END
+               ) as effective_provider
+        FROM transactions t
+        LEFT JOIN accounts a ON t.account_id = a.id
+        WHERE t.raw_source_message = ?
+          AND t.is_deleted = 0
+      `;
+      const eventParams: any[] = [query.rawSourceMessage.trim()];
+
+      if (candidateProvider) {
+        eventSql += ` AND (
+          COALESCE(
+            t.provider_key,
+            a.provider_key,
+            CASE 
+              WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+              WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+              WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+              ELSE NULL
+            END
+          ) = ? OR COALESCE(
+            t.provider_key,
+            a.provider_key,
+            CASE 
+              WHEN t.parser_version LIKE 'telebirr%' OR t.template_id LIKE 'telebirr%' THEN 'TELEBIRR'
+              WHEN t.parser_version LIKE 'cbe%' OR t.template_id LIKE 'cbe%' THEN 'CBE'
+              WHEN t.parser_version LIKE 'awash%' OR t.template_id LIKE 'awash%' THEN 'AWASH'
+              ELSE NULL
+            END
+          ) IS NULL
+        )`;
+        eventParams.push(candidateProvider);
+      }
+
+      eventSql += ' LIMIT 5;';
+      const eventRows = await db.getAllAsync<any>(eventSql, eventParams);
+
+      for (const row of eventRows) {
+        // Condition 1: Exact source_timestamp match (Android sbn.postTime match between live event and durable drain)
+        if (query.sourceTimestamp && row.source_timestamp && query.sourceTimestamp === row.source_timestamp) {
+          console.log(`[DUPLICATE:MATCH] Tier 2.5 exact source_timestamp replay matched tx id=${row.id}`);
+          return {
+            matchFound: true,
+            transaction: mapRowToTx(row),
+            confidence: 'EXACT_EVENT_REPLAY',
+            matchReason: 'Exact notification replay: identical raw message and source timestamp already persisted.',
+          };
+        }
+
+        // Condition 2: Exact balance-after-transaction match on identical raw message
+        if (
+          query.balanceAfterTransaction !== null &&
+          query.balanceAfterTransaction !== undefined &&
+          row.balance_after_transaction !== null &&
+          row.balance_after_transaction !== undefined &&
+          Number(query.balanceAfterTransaction) === Number(row.balance_after_transaction)
+        ) {
+          console.log(`[DUPLICATE:MATCH] Tier 2.5 identical raw message and balance-after-transaction matched tx id=${row.id}`);
+          return {
+            matchFound: true,
+            transaction: mapRowToTx(row),
+            confidence: 'EXACT_EVENT_REPLAY',
+            matchReason: `Exact message replay: identical raw message and remaining balance (${query.balanceAfterTransaction} ETB) already persisted.`,
+          };
+        }
+
+        // Condition 3: Immediate broadcast retransmission within 120 seconds on identical raw message
+        const txTime = new Date(row.timestamp).getTime();
+        const candTime = new Date(query.timestamp).getTime();
+        if (Math.abs(candTime - txTime) <= 120 * 1000) {
+          console.log(`[DUPLICATE:MATCH] Tier 2.5 immediate broadcast retransmission matched tx id=${row.id}`);
+          return {
+            matchFound: true,
+            transaction: mapRowToTx(row),
+            confidence: 'EXACT_EVENT_REPLAY',
+            matchReason: 'Immediate duplicate broadcast: identical raw message delivered within 2 minutes.',
+          };
+        }
+      }
+    }
+
+    // ----------------------------------------------------
     // Tier 3: Clean Merchant + Account/Provider + Same Date + Amount Match
     // ----------------------------------------------------
     if (query.cleanMerchant && query.amount > 0 && query.timestamp) {
@@ -976,17 +1075,68 @@ export class DatabaseService {
         const existingRefValid = RegexParser.isValidReference(existingRef);
         const candidateRefValid = !!refToSearch && RegexParser.isValidReference(refToSearch);
 
-        // If both transactions have valid references and they differ, they are distinct transactions
+        // Rule A: If both transactions have valid references and they differ, they are distinct transactions
         if (candidateRefValid && existingRefValid && refToSearch !== existingRef) {
           continue;
         }
 
-        return {
-          matchFound: true,
-          transaction: mapRowToTx(row),
-          confidence: 'HIGH_METADATA',
-          matchReason: `Same merchant (${query.cleanMerchant}), ${row.account_name}, and amount matched on ${query.timestamp.substring(0, 10)}.`,
-        };
+        // Rule B: If both have valid references and they match, that is a confirmed metadata match
+        if (candidateRefValid && existingRefValid && refToSearch === existingRef) {
+          return {
+            matchFound: true,
+            transaction: mapRowToTx(row),
+            confidence: 'HIGH_METADATA',
+            matchReason: `Same merchant (${query.cleanMerchant}), ${row.account_name}, amount, and reference (${refToSearch}) on ${query.timestamp.substring(0, 10)}.`,
+          };
+        }
+
+        // Rule C: For transactions WITHOUT a valid reference (e.g. Awash transfers/debits with ref=none),
+        // same provider + merchant + amount + date ALONE is NOT enough!
+        // Two legitimate transactions can occur to the same merchant with the same amount on the same day (e.g. 09:00 vs 14:00).
+        // Require corroborating evidence:
+
+        // Corroboration 1: Balance-after-transaction comparison
+        const candBalance =
+          query.balanceAfterTransaction !== undefined && query.balanceAfterTransaction !== null
+            ? Number(query.balanceAfterTransaction)
+            : null;
+        const existBalance =
+          row.balance_after_transaction !== undefined && row.balance_after_transaction !== null
+            ? Number(row.balance_after_transaction)
+            : null;
+
+        if (candBalance !== null && existBalance !== null) {
+          if (candBalance === existBalance) {
+            // Identical remaining balance after debit proves it is the exact same transaction
+            return {
+              matchFound: true,
+              transaction: mapRowToTx(row),
+              confidence: 'HIGH_METADATA',
+              matchReason: `Same merchant (${query.cleanMerchant}), amount, and identical remaining balance (${candBalance} ETB) on ${query.timestamp.substring(0, 10)}.`,
+            };
+          } else {
+            // Balances differ (e.g. 4650 vs 4625 ETB), proving these are two separate consecutive transactions!
+            console.log(`[DUPLICATE:SKIP] Ref-less transactions have different balances (${candBalance} vs ${existBalance}). Preserving as distinct.`);
+            continue;
+          }
+        }
+
+        // Corroboration 2: Identical raw message within tight 120s retransmission window
+        if (query.rawSourceMessage && row.raw_source_message === query.rawSourceMessage) {
+          const timeDiff = Math.abs(new Date(query.timestamp).getTime() - new Date(row.timestamp).getTime());
+          if (timeDiff <= 120 * 1000) {
+            return {
+              matchFound: true,
+              transaction: mapRowToTx(row),
+              confidence: 'HIGH_METADATA',
+              matchReason: `Same merchant (${query.cleanMerchant}), amount, and identical message delivered within 2 minutes on ${query.timestamp.substring(0, 10)}.`,
+            };
+          }
+        }
+
+        // Without corroborating evidence, two ref-less transactions on the same day are distinct real transactions!
+        console.log(`[DUPLICATE:SKIP] Ref-less transactions on same day lack duplicate corroboration (merchant=${query.cleanMerchant}, amount=${query.amount}). Preserving both.`);
+        continue;
       }
     }
 
@@ -1126,14 +1276,7 @@ export class DatabaseService {
     }));
   }
 
-  public async getBudgetsWithSpent(month: number, year: number): Promise<
-    Array<{
-      category: Category;
-      monthlyLimit: number;
-      spentAmount: number;
-      percentageSpent: number;
-    }>
-  > {
+  public async getBudgetsWithSpent(month: number, year: number): Promise<BudgetWithSpent[]> {
     const db = await this.getDb();
     const startDate = `${year}-${String(month).padStart(2, '0')}-01T00:00:00.000Z`;
     const nextMonth = month === 12 ? 1 : month + 1;
@@ -1142,6 +1285,7 @@ export class DatabaseService {
 
     const rows = await db.getAllAsync<any>(
       `SELECT c.*, 
+        b.id as budget_id,
         COALESCE(b.monthly_limit, 0) as monthly_limit,
         COALESCE((
           SELECT SUM(amount) 
@@ -1161,8 +1305,17 @@ export class DatabaseService {
     return rows.map((r) => {
       const limit = r.monthly_limit;
       const spent = r.spent_amount;
-      const pct = limit > 0 ? Math.min(Math.round((spent / limit) * 100), 100) : 0;
+      const pct = limit > 0 ? Math.round((spent / limit) * 100) : 0;
+      const remaining = Math.max(0, limit - spent);
+      let status: 'HEALTHY' | 'WARNING' | 'EXCEEDED' = 'HEALTHY';
+      if (limit > 0 && spent > limit) {
+        status = 'EXCEEDED';
+      } else if (limit > 0 && pct >= 80) {
+        status = 'WARNING';
+      }
+
       return {
+        id: r.budget_id || undefined,
         category: {
           id: r.id,
           name: r.name,
@@ -1173,9 +1326,72 @@ export class DatabaseService {
         },
         monthlyLimit: limit,
         spentAmount: spent,
+        remainingAmount: remaining,
         percentageSpent: pct,
+        status,
+        hasBudget: limit > 0,
       };
     });
+  }
+
+  public async getBudgets(month: number, year: number): Promise<Budget[]> {
+    const db = await this.getDb();
+    const rows = await db.getAllAsync<any>(
+      'SELECT * FROM budgets WHERE month = ? AND year = ?;',
+      [month, year]
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      categoryId: r.category_id,
+      monthlyLimit: r.monthly_limit,
+      month: r.month,
+      year: r.year,
+    }));
+  }
+
+  public async setBudget(budget: {
+    categoryId: string;
+    monthlyLimit: number;
+    month: number;
+    year: number;
+  }): Promise<Budget> {
+    const db = await this.getDb();
+    const existing = await db.getFirstAsync<any>(
+      'SELECT id FROM budgets WHERE category_id = ? AND month = ? AND year = ?;',
+      [budget.categoryId, budget.month, budget.year]
+    );
+
+    if (existing) {
+      await db.runAsync(
+        'UPDATE budgets SET monthly_limit = ? WHERE id = ?;',
+        [budget.monthlyLimit, existing.id]
+      );
+      return {
+        id: existing.id,
+        categoryId: budget.categoryId,
+        monthlyLimit: budget.monthlyLimit,
+        month: budget.month,
+        year: budget.year,
+      };
+    } else {
+      const id = `bgt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      await db.runAsync(
+        'INSERT INTO budgets (id, category_id, monthly_limit, month, year) VALUES (?, ?, ?, ?, ?);',
+        [id, budget.categoryId, budget.monthlyLimit, budget.month, budget.year]
+      );
+      return {
+        id,
+        categoryId: budget.categoryId,
+        monthlyLimit: budget.monthlyLimit,
+        month: budget.month,
+        year: budget.year,
+      };
+    }
+  }
+
+  public async deleteBudget(id: string): Promise<void> {
+    const db = await this.getDb();
+    await db.runAsync('DELETE FROM budgets WHERE id = ?;', [id]);
   }
 
   // --- Local Financial Metric Aggregations (Zero API Dependency) ---
@@ -1254,6 +1470,287 @@ export class DatabaseService {
       topMerchants: merchantRows,
       spendingByWeek: [], // Computed on demand
     };
+  }
+
+  // --- Local Financial Summary Digest (100% Offline, Zero AI Dependency) ---
+
+  public async getFinancialSummaryDigest(month: number, year: number): Promise<LocalFinancialDigest> {
+    const db = await this.getDb();
+    const MONTH_NAMES = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    const monthName = MONTH_NAMES[month - 1] || 'Current Month';
+
+    const startDate = `${year}-${String(month).padStart(2, '0')}-01T00:00:00.000Z`;
+    const nextMonth = month === 12 ? 1 : month + 1;
+    const nextYear = month === 12 ? year + 1 : year;
+    const endDate = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01T00:00:00.000Z`;
+
+    const prevMonth = month === 1 ? 12 : month - 1;
+    const prevYear = month === 1 ? year - 1 : year;
+    const prevStartDate = `${prevYear}-${String(prevMonth).padStart(2, '0')}-01T00:00:00.000Z`;
+    const prevEndDate = startDate;
+
+    // Totals & Counts
+    const totals = await db.getFirstAsync<{
+      income: number;
+      expense: number;
+      expense_count: number;
+      income_count: number;
+      transfer_count: number;
+    }>(
+      `SELECT 
+        COALESCE(SUM(CASE WHEN type = 'INCOME' THEN amount ELSE 0 END), 0) as income,
+        COALESCE(SUM(CASE WHEN (type = 'EXPENSE' OR (type = 'TRANSFER' AND destination_account_id IS NULL)) THEN amount ELSE 0 END), 0) as expense,
+        COUNT(CASE WHEN (type = 'EXPENSE' OR (type = 'TRANSFER' AND destination_account_id IS NULL)) THEN 1 END) as expense_count,
+        COUNT(CASE WHEN type = 'INCOME' THEN 1 END) as income_count,
+        COUNT(CASE WHEN type = 'TRANSFER' THEN 1 END) as transfer_count
+       FROM transactions
+       WHERE is_deleted = 0 
+         AND status = 'CONFIRMED'
+         AND timestamp >= ? AND timestamp < ?;`,
+      [startDate, endDate]
+    );
+
+    const totalIncome = totals?.income ?? 0;
+    const totalExpense = totals?.expense ?? 0;
+    const netSavings = totalIncome - totalExpense;
+    const expenseCount = totals?.expense_count ?? 0;
+    const incomeCount = totals?.income_count ?? 0;
+    const transferCount = totals?.transfer_count ?? 0;
+
+    // Previous Month Expense for MoM Trend
+    const prevRow = await db.getFirstAsync<{ prev_expense: number }>(
+      `SELECT 
+        COALESCE(SUM(amount), 0) as prev_expense
+       FROM transactions
+       WHERE (type = 'EXPENSE' OR (type = 'TRANSFER' AND destination_account_id IS NULL))
+         AND is_deleted = 0 
+         AND status = 'CONFIRMED'
+         AND timestamp >= ? AND timestamp < ?;`,
+      [prevStartDate, prevEndDate]
+    );
+    const prevMonthExpense = prevRow?.prev_expense ?? 0;
+    let momExpenseChangePct: number | undefined = undefined;
+    if (prevMonthExpense > 0) {
+      momExpenseChangePct = Math.round(((totalExpense - prevMonthExpense) / prevMonthExpense) * 100);
+    }
+
+    const averageExpenseAmount = expenseCount > 0
+      ? Math.round((totalExpense / expenseCount) * 100) / 100
+      : 0;
+
+    // Largest Expense
+    const largestRow = await db.getFirstAsync<{
+      amount: number;
+      merchant: string;
+      category_name: string | null;
+    }>(
+      `SELECT 
+        t.amount,
+        COALESCE(t.clean_merchant, t.merchant_name) as merchant,
+        c.name as category_name
+       FROM transactions t
+       LEFT JOIN categories c ON t.category_id = c.id
+       WHERE (t.type = 'EXPENSE' OR (t.type = 'TRANSFER' AND t.destination_account_id IS NULL))
+         AND t.is_deleted = 0 
+         AND t.status = 'CONFIRMED'
+         AND t.timestamp >= ? AND t.timestamp < ?
+       ORDER BY t.amount DESC
+       LIMIT 1;`,
+      [startDate, endDate]
+    );
+
+    const largestExpense = largestRow
+      ? {
+          merchant: largestRow.merchant,
+          amount: largestRow.amount,
+          categoryName: largestRow.category_name || undefined,
+        }
+      : undefined;
+
+    // Top Categories
+    const categoryRows = await db.getAllAsync<{
+      id: string;
+      name: string;
+      color_hex: string;
+      amount: number;
+    }>(
+      `SELECT c.id, c.name, c.color_hex, SUM(t.amount) as amount
+       FROM transactions t
+       JOIN categories c ON t.category_id = c.id
+       WHERE (t.type = 'EXPENSE' OR (t.type = 'TRANSFER' AND t.destination_account_id IS NULL))
+         AND t.is_deleted = 0 
+         AND t.status = 'CONFIRMED'
+         AND t.timestamp >= ? AND t.timestamp < ?
+       GROUP BY c.id
+       ORDER BY amount DESC
+       LIMIT 6;`,
+      [startDate, endDate]
+    );
+
+    const topCategories = categoryRows.map((c) => ({
+      id: c.id,
+      name: c.name,
+      amount: c.amount,
+      color: c.color_hex,
+      percentage: totalExpense > 0 ? Math.round((c.amount / totalExpense) * 100) : 0,
+    }));
+
+    let top2ConcentrationPct: number | undefined = undefined;
+    if (topCategories.length >= 2 && totalExpense > 0) {
+      top2ConcentrationPct = Math.round(((topCategories[0].amount + topCategories[1].amount) / totalExpense) * 100);
+    } else if (topCategories.length === 1 && totalExpense > 0) {
+      top2ConcentrationPct = Math.round((topCategories[0].amount / totalExpense) * 100);
+    }
+
+    // Uncategorized
+    const uncategorizedRow = await db.getFirstAsync<{
+      count: number;
+      amount: number;
+    }>(
+      `SELECT 
+        COUNT(*) as count,
+        COALESCE(SUM(amount), 0) as amount
+       FROM transactions
+       WHERE (type = 'EXPENSE' OR (type = 'TRANSFER' AND destination_account_id IS NULL))
+         AND is_deleted = 0 
+         AND status = 'CONFIRMED'
+         AND (category_id IS NULL OR category_id = '')
+         AND timestamp >= ? AND timestamp < ?;`,
+      [startDate, endDate]
+    );
+
+    const uncategorizedCount = uncategorizedRow?.count ?? 0;
+    const uncategorizedTotalAmount = uncategorizedRow?.amount ?? 0;
+
+    // Account breakdown
+    const accountRows = await db.getAllAsync<{
+      id: string;
+      name: string;
+      provider_key: string;
+      spent_amount: number;
+      tx_count: number;
+    }>(
+      `SELECT 
+        a.id, a.name, a.provider_key,
+        COALESCE(SUM(t.amount), 0) as spent_amount,
+        COUNT(t.id) as tx_count
+       FROM accounts a
+       LEFT JOIN transactions t ON t.account_id = a.id
+         AND (t.type = 'EXPENSE' OR (t.type = 'TRANSFER' AND t.destination_account_id IS NULL))
+         AND t.is_deleted = 0 
+         AND t.status = 'CONFIRMED'
+         AND t.timestamp >= ? AND t.timestamp < ?
+       WHERE a.is_active = 1
+       GROUP BY a.id
+       ORDER BY spent_amount DESC;`,
+      [startDate, endDate]
+    );
+
+    const accountBreakdown = accountRows.map((a) => ({
+      id: a.id,
+      name: a.name,
+      providerKey: a.provider_key,
+      spentAmount: a.spent_amount,
+      txCount: a.tx_count,
+    }));
+
+    // Top Merchants
+    const merchantRows = await db.getAllAsync<{
+      merchant: string;
+      amount: number;
+      count: number;
+    }>(
+      `SELECT COALESCE(clean_merchant, merchant_name) as merchant, SUM(amount) as amount, COUNT(*) as count
+       FROM transactions
+       WHERE (type = 'EXPENSE' OR (type = 'TRANSFER' AND destination_account_id IS NULL))
+         AND is_deleted = 0 
+         AND status = 'CONFIRMED'
+         AND timestamp >= ? AND timestamp < ?
+       GROUP BY merchant
+       ORDER BY amount DESC
+       LIMIT 5;`,
+      [startDate, endDate]
+    );
+
+    return {
+      month,
+      monthName,
+      year,
+      totalIncome,
+      totalExpense,
+      netSavings,
+      prevMonthExpense,
+      momExpenseChangePct,
+      expenseCount,
+      incomeCount,
+      transferCount,
+      averageExpenseAmount,
+      largestExpense,
+      topCategories,
+      top2ConcentrationPct,
+      uncategorizedCount,
+      uncategorizedTotalAmount,
+      accountBreakdown,
+      topMerchants: merchantRows,
+    };
+  }
+
+  // --- Monthly Financial Report Cache ---
+
+  public async getCachedMonthlyReport(month: number, year: number): Promise<MonthlyFinancialReport | null> {
+    const db = await this.getDb();
+    const row = await db.getFirstAsync<any>(
+      `SELECT * FROM monthly_financial_report WHERE month = ? AND year = ? ORDER BY created_at DESC LIMIT 1;`,
+      [month, year]
+    );
+    if (!row) return null;
+    return {
+      id: row.id,
+      month: row.month,
+      year: row.year,
+      summaryHeadline: row.summary_headline,
+      contentJson: row.content_json,
+      createdAt: row.created_at,
+    };
+  }
+
+  public async saveMonthlyReport(
+    month: number,
+    year: number,
+    summaryHeadline: string,
+    contentJson: string
+  ): Promise<MonthlyFinancialReport> {
+    const db = await this.getDb();
+    await db.runAsync(
+      `DELETE FROM monthly_financial_report WHERE month = ? AND year = ?;`,
+      [month, year]
+    );
+    const id = `report_${year}_${month}_${Date.now()}`;
+    const now = new Date().toISOString();
+    await db.runAsync(
+      `INSERT INTO monthly_financial_report (id, month, year, summary_headline, content_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?);`,
+      [id, month, year, summaryHeadline, contentJson, now]
+    );
+    return {
+      id,
+      month,
+      year,
+      summaryHeadline,
+      contentJson,
+      createdAt: now,
+    };
+  }
+
+  public async clearMonthlyReportCache(month: number, year: number): Promise<void> {
+    const db = await this.getDb();
+    await db.runAsync(
+      `DELETE FROM monthly_financial_report WHERE month = ? AND year = ?;`,
+      [month, year]
+    );
   }
 
   // --- AI Usage Tracking ---
@@ -1405,6 +1902,18 @@ export class DatabaseService {
   public async deleteSavingsGoal(id: string): Promise<void> {
     const db = await this.getDb();
     await db.runAsync('DELETE FROM savings_goals WHERE id = ?;', [id]);
+  }
+
+  public async addSavingsContribution(id: string, amount: number): Promise<void> {
+    const db = await this.getDb();
+    const goal = await db.getFirstAsync<any>('SELECT * FROM savings_goals WHERE id = ?;', [id]);
+    if (!goal) throw new Error('Goal not found');
+    const newSaved = Math.max(0, (goal.saved_amount || 0) + amount);
+    const isCompleted = newSaved >= goal.target_amount ? 1 : goal.is_completed;
+    await db.runAsync(
+      'UPDATE savings_goals SET saved_amount = ?, is_completed = ? WHERE id = ?;',
+      [newSaved, isCompleted, id]
+    );
   }
 
   // --- Account Reconciliation ---

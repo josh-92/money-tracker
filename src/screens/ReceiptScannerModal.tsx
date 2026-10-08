@@ -86,20 +86,28 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
     setMatchingTx(null);
     setMatchResult(null);
     try {
-      const data = await aiService.parseReceipt(uri);
-      setExtractedData(data);
+      const result = await aiService.parseReceipt(uri);
+      if (result.status === 'SUCCESS' || (result.status === 'UNCERTAIN' && result.data)) {
+        const data = result.data!;
+        setExtractedData(data);
 
-      // Check for duplicate in SQLite ledger using 4-tier matching engine
-      const matchRes = await dbService.findMatchingTransaction({
-        amount: data.totalAmount,
-        timestamp: data.transactionDate || new Date().toISOString(),
-        cleanMerchant: data.merchantName,
-        toleranceMinutes: 120,
-      });
+        // Check for duplicate in SQLite ledger using 4-tier matching engine
+        const matchRes = await dbService.findMatchingTransaction({
+          amount: data.totalAmount,
+          timestamp: data.transactionDate || new Date().toISOString(),
+          cleanMerchant: data.merchantName,
+          toleranceMinutes: 120,
+        });
 
-      if (matchRes.matchFound && matchRes.transaction) {
-        setMatchingTx(matchRes.transaction);
-        setMatchResult(matchRes);
+        if (matchRes.matchFound && matchRes.transaction) {
+          setMatchingTx(matchRes.transaction);
+          setMatchResult(matchRes);
+        }
+      } else {
+        const errDesc =
+          result.errorMessage ||
+          (result.validationErrors.length > 0 ? result.validationErrors.join('; ') : 'Gemini could not parse this receipt.');
+        Alert.alert('Extraction Notice', errDesc);
       }
     } catch (err: any) {
       Alert.alert('Extraction Notice', err.message || 'Gemini could not parse this receipt.');

@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "money-tracker",
+    "name": "Money Tracker",
     "slug": "money-tracker",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -15,7 +15,8 @@
         "foregroundImage": "./assets/android/mipmap-xxxhdpi/ic_launcher_foreground.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.moneytracker.app"
+      "package": "com.moneytracker.app",
+      "versionCode": 1
     },
     "plugins": [
       "./plugins/withNotificationListener.js",
